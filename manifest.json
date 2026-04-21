@@ -1,0 +1,10 @@
+{
+  "id": "llm-wiki-plugin",
+  "name": "LLM Wiki",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Transform Obsidian into an AI-driven, self-maintaining knowledge base (LLM Wiki) with incremental compilation mode.",
+  "author": "LLM Wiki Team",
+  "authorUrl": "https://github.com/sarahqd",
+  "isDesktopOnly": false
+}

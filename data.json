@@ -1,0 +1,15 @@
+{
+  "ollamaUrl": "http://localhost:11434",
+  "model": "deepseek-r1:1.5b",
+  "wikiPath": "Wiki",
+  "sourcesPath": "Sources",
+  "templatesPath": "Templates",
+  "autoIngest": true,
+  "autoLint": true,
+  "lintInterval": 60,
+  "maxContextTokens": 4000,
+  "autoSaveChat": false,
+  "chatHistoryPath": "Sources/chats",
+  "showHistoryPanel": true,
+  "maxHistoryDisplay": 3
+}
