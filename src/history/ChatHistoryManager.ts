@@ -1,13 +1,13 @@
 /**
- * Chat History Manager - 聊天历史管理模块
- * 支持保存、加载、管理聊天历史记录
+ * Chat History Manager - Chat history management module
+ * Supports saving, loading, and managing chat history records
  */
 
 import { App, TFile, TFolder, TAbstractFile } from 'obsidian';
 import type { LLMWikiSettings, ChatSession, ChatMessage } from '../types';
 
 /**
- * 聊天历史管理器类
+ * Chat history manager class
  */
 export class ChatHistoryManager {
     private app: App;
@@ -22,7 +22,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 初始化历史记录目录
+     * Initialize history directory
      */
     async initialize(): Promise<void> {
         const chatPath = this.settings.chatHistoryPath;
@@ -32,7 +32,7 @@ export class ChatHistoryManager {
             await this.app.vault.createFolder(chatPath);
         }
 
-        // 确保历史文件存在
+        // Ensure history file exists
         const historyFile = this.app.vault.getAbstractFileByPath(this.historyFile);
         if (!historyFile) {
             await this.app.vault.create(this.historyFile, JSON.stringify({ sessions: [] }, null, 2));
@@ -40,12 +40,12 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 创建新的聊天会话
+     * Create new chat session
      */
     createNewSession(): ChatSession {
         const session: ChatSession = {
             id: `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-            title: '新对话',
+            title: 'New Chat',
             messages: [],
             model: this.settings.model,
             createdAt: Date.now(),
@@ -57,36 +57,36 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 获取当前会话
+     * Get current session
      */
     getCurrentSession(): ChatSession | null {
         return this.currentSession;
     }
 
     /**
-     * 设置当前会话
+     * Set current session
      */
     setCurrentSession(session: ChatSession): void {
         this.currentSession = session;
     }
 
     /**
-     * 添加消息到当前会话
+     * Add message to current session
      */
     addMessageToSession(message: ChatMessage): void {
         if (this.currentSession) {
             this.currentSession.messages.push(message);
             this.currentSession.updatedAt = Date.now();
             
-            // 更新标题（使用第一条用户消息）
-            if (this.currentSession.title === '新对话' && message.role === 'user') {
+            // Update title (use first user message)
+            if (this.currentSession.title === 'New Chat' && message.role === 'user') {
                 this.currentSession.title = this.generateTitle(message.content);
             }
         }
     }
 
     /**
-     * 更新会话中的最后一条消息
+     * Update last message in session
      */
     updateLastMessage(content: string): void {
         if (this.currentSession && this.currentSession.messages.length > 0) {
@@ -97,16 +97,16 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 生成会话标题
+     * Generate session title
      */
     private generateTitle(content: string): string {
-        // 截取前30个字符作为标题
+        // Take first 30 characters as title
         const title = content.trim().substring(0, 30);
         return title.length < content.trim().length ? title + '...' : title;
     }
 
     /**
-     * 保存当前会话到历史
+     * Save current session to history
      */
     async saveCurrentSession(): Promise<boolean> {
         if (!this.currentSession || this.currentSession.messages.length === 0) {
@@ -118,7 +118,7 @@ export class ChatHistoryManager {
             
             const historyData = await this.loadHistoryData();
             
-            // 查找是否已存在
+            // Find if already exists
             const existingIndex = historyData.sessions.findIndex(
                 (s: ChatSession) => s.id === this.currentSession!.id
             );
@@ -129,10 +129,10 @@ export class ChatHistoryManager {
                 historyData.sessions.unshift(this.currentSession);
             }
             
-            // 按更新时间排序
+            // Sort by update time
             historyData.sessions.sort((a: ChatSession, b: ChatSession) => b.updatedAt - a.updatedAt);
             
-            // 限制历史数量（最多保存 100 条）
+            // Limit history count (max 100 records)
             if (historyData.sessions.length > 100) {
                 historyData.sessions = historyData.sessions.slice(0, 100);
             }
@@ -150,7 +150,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 加载历史数据
+     * Load history data
      */
     private async loadHistoryData(): Promise<{ sessions: ChatSession[] }> {
         try {
@@ -166,7 +166,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 获取所有历史会话
+     * Get all history sessions
      */
     async getAllSessions(): Promise<ChatSession[]> {
         const data = await this.loadHistoryData();
@@ -174,7 +174,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 获取最近的 N 个历史会话
+     * Get recent N history sessions
      */
     async getRecentSessions(limit: number = 3): Promise<ChatSession[]> {
         const sessions = await this.getAllSessions();
@@ -182,7 +182,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 根据 ID 加载会话
+     * Load session by ID
      */
     async loadSession(sessionId: string): Promise<ChatSession | null> {
         const sessions = await this.getAllSessions();
@@ -194,7 +194,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 删除会话
+     * Delete session
      */
     async deleteSession(sessionId: string): Promise<boolean> {
         try {
@@ -216,7 +216,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 清空所有历史
+     * Clear all history
      */
     async clearAllHistory(): Promise<boolean> {
         try {
@@ -232,7 +232,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 格式化时间显示
+     * Format time display
      */
     formatTime(timestamp: number): string {
         const now = Date.now();
@@ -243,13 +243,13 @@ export class ChatHistoryManager {
 
         if (diff < oneHour) {
             const minutes = Math.floor(diff / oneMinute);
-            return `${minutes} 分钟前`;
+            return `${minutes} minutes ago`;
         } else if (diff < oneDay) {
             const hours = Math.floor(diff / oneHour);
-            return `${hours} 小时前`;
+            return `${hours} hours ago`;
         } else if (diff < 7 * oneDay) {
             const days = Math.floor(diff / oneDay);
-            return `${days} 天前`;
+            return `${days} days ago`;
         } else {
             const date = new Date(timestamp);
             return `${date.getMonth() + 1}/${date.getDate()}`;
@@ -257,7 +257,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 获取会话摘要信息
+     * Get session summary info
      */
     getSessionSummary(session: ChatSession): {
         title: string;
@@ -274,7 +274,7 @@ export class ChatHistoryManager {
     }
 
     /**
-     * 清空当前会话消息
+     * Clear current session messages
      */
     clearCurrentSession(): void {
         if (this.currentSession) {
@@ -285,7 +285,7 @@ export class ChatHistoryManager {
 }
 
 /**
- * 聊天保存器类
+ * Chat saver class
  */
 export class ChatSaver {
     private app: App;
@@ -297,7 +297,7 @@ export class ChatSaver {
     }
 
     /**
-     * 保存聊天为 Markdown 文件
+     * Save chat as Markdown file
      */
     async saveAsMarkdown(session: ChatSession): Promise<string | null> {
         try {
@@ -328,7 +328,7 @@ export class ChatSaver {
     }
 
     /**
-     * 格式化日期时间
+     * Format date time
      */
     private formatDateTime(timestamp: number): string {
         const date = new Date(timestamp);
@@ -342,29 +342,29 @@ export class ChatSaver {
     }
 
     /**
-     * 生成 Markdown 内容
+     * Generate Markdown content
      */
     private generateMarkdown(session: ChatSession): string {
         const lines: string[] = [];
-        const dateStr = new Date(session.createdAt).toLocaleString('zh-CN');
+        const dateStr = new Date(session.createdAt).toLocaleString('en-US');
 
-        lines.push(`# 聊天记录 - ${dateStr}`);
+        lines.push(`# Chat Record - ${dateStr}`);
         lines.push('');
-        lines.push('## 元信息');
+        lines.push('## Meta Information');
         lines.push('');
-        lines.push(`- 模型: ${session.model}`);
-        lines.push(`- 消息数: ${session.messages.length}`);
-        lines.push(`- 创建时间: ${dateStr}`);
-        lines.push(`- 更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`);
+        lines.push(`- Model: ${session.model}`);
+        lines.push(`- Message Count: ${session.messages.length}`);
+        lines.push(`- Created: ${dateStr}`);
+        lines.push(`- Updated: ${new Date(session.updatedAt).toLocaleString('en-US')}`);
         lines.push('');
 
-        // 添加上下文信息
+        // Add context information
         const contexts = session.messages
             .filter(m => m.context && m.context.length > 0)
             .flatMap(m => m.context || []);
         
         if (contexts.length > 0) {
-            lines.push('### 上下文');
+            lines.push('### Context');
             lines.push('');
             contexts.forEach(ctx => {
                 lines.push(`- ${ctx.name} (${ctx.tokens} tokens)`);
@@ -372,22 +372,22 @@ export class ChatSaver {
             lines.push('');
         }
 
-        lines.push('## 对话');
+        lines.push('## Conversation');
         lines.push('');
 
         session.messages.forEach(message => {
-            const time = new Date(message.timestamp).toLocaleTimeString('zh-CN');
-            const role = message.role === 'user' ? '用户' : 
-                         message.role === 'assistant' ? '助手' : '系统';
+            const time = new Date(message.timestamp).toLocaleTimeString('en-US');
+            const role = message.role === 'user' ? 'User' : 
+                         message.role === 'assistant' ? 'Assistant' : 'System';
             
             lines.push(`### ${role} (${time})`);
             lines.push('');
             lines.push(message.content);
             lines.push('');
 
-            // 添加工具调用信息
+            // Add tool call information
             if (message.toolCalls && message.toolCalls.length > 0) {
-                lines.push('**工具调用:**');
+                lines.push('**Tool Calls:**');
                 lines.push('```json');
                 lines.push(JSON.stringify(message.toolCalls, null, 2));
                 lines.push('```');

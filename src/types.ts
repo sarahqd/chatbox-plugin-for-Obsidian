@@ -13,12 +13,12 @@ export interface LLMWikiSettings {
     autoIngest: boolean;
     autoLint: boolean;
     lintInterval: number;
-    // 新增：聊天增强设置
-    maxContextTokens: number;      // 最大上下文 token 数
-    autoSaveChat: boolean;         // 自动保存聊天
-    chatHistoryPath: string;       // 聊天历史保存路径
-    showHistoryPanel: boolean;     // 是否显示历史面板
-    maxHistoryDisplay: number;     // 历史面板最大显示数
+    // Chat enhancement settings
+    maxContextTokens: number;      // Max context token count
+    autoSaveChat: boolean;         // Auto save chat
+    chatHistoryPath: string;       // Chat history save path
+    showHistoryPanel: boolean;     // Whether to show history panel
+    maxHistoryDisplay: number;     // Max history panel display count
 }
 
 export const DEFAULT_SETTINGS: LLMWikiSettings = {
@@ -30,7 +30,7 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     autoIngest: true,
     autoLint: false,
     lintInterval: 60,
-    // 新增：聊天增强默认设置
+    // Chat enhancement default settings
     maxContextTokens: 8192,
     autoSaveChat: false,
     chatHistoryPath: 'Sources/chats',
@@ -165,7 +165,7 @@ export interface LintResult {
 
 // ============== Chat Types ==============
 
-// 上下文类型
+// Context type
 export interface ChatContext {
     id: string;
     type: 'file' | 'wiki' | 'folder' | 'text';
@@ -182,10 +182,10 @@ export interface ChatMessage {
     timestamp: number;
     toolCalls?: OllamaToolCall[];
     pending?: boolean;
-    context?: ChatContext[];  // 关联的上下文
+    context?: ChatContext[];  // Associated context
 }
 
-// 聊天会话类型
+// Chat session type
 export interface ChatSession {
     id: string;
     title: string;
@@ -196,7 +196,7 @@ export interface ChatSession {
     totalTokens: number;
 }
 
-// 模型信息
+// Model info
 export interface ModelInfo {
     name: string;
     size?: number;

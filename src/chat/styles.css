@@ -1,15 +1,15 @@
 /* ============================================
-   聊天对话框样式 - 三段式布局
-   根据 chat-dialog-redesign-requirements.md 规范实现
+   Chat Dialog Styles - Three-Section Layout
+   Implemented according to chat-dialog-redesign-requirements.md
    ============================================ */
 
-/* 容器布局 */
+/* Container Layout */
 .llm-wiki-chat {
     height: 100%;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;  /* 防止整体滚动 */
+    overflow: hidden;  /* Prevent overall scrolling */
 }
 
 .chat-container {
@@ -18,14 +18,14 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
-    overflow: hidden;  /* 防止整体滚动 */
+    overflow: hidden;  /* Prevent overall scrolling */
 }
 
 /* ============================================
-   第一部分: 头部 (固定一行，扁平风格)
-   - 高度: 固定一行，约 40-48px
-   - 位置: 固定在 sidebar 顶部
-   - 风格: 扁平风格，无阴影，无边框
+   Part 1: Header (Fixed row, flat style)
+   - Height: Fixed row, about 40-48px
+   - Position: Fixed at sidebar top
+   - Style: Flat style, no shadow, no border
    ============================================ */
 
 .chat-header {
@@ -62,7 +62,7 @@
     white-space: nowrap;
 }
 
-/* 扁平按钮样式规范 */
+/* Flat button style specification */
 .flat-btn {
     background: transparent;
     border: none;
@@ -94,22 +94,22 @@
 }
 
 /* ============================================
-   第二部分: 信息展示区 (弹性高度，可滚动)
-   - 高度: 弹性高度，填充头部和输入界面之间的空间
-   - 位置: 头部下方，输入界面上方
-   - 滚动: 内容超出时支持滚动
-   - 特性: 不会被输入界面挤压
+   Part 2: Information Display Area (Flexible height, scrollable)
+   - Height: Flexible, fills space between header and input
+   - Position: Below header, above input
+   - Scroll: Supports scrolling when content overflows
+   - Feature: Not compressed by input area
    ============================================ */
 
 .display-area {
     flex: 1 1 auto;
     overflow: hidden;
-    min-height: 0;  /* 重要: 允许收缩 */
+    min-height: 0;  /* Important: Allow shrinking */
     position: relative;
     z-index: 1;
 }
 
-/* 聊天消息列表 */
+/* Chat message list */
 .messages-list {
     height: 100%;
     min-height: 0;
@@ -117,7 +117,7 @@
     padding: 16px;
 }
 
-/* 消息外层容器 (控制对齐方向) */
+/* Message wrapper (controls alignment direction) */
 .message-wrapper {
     display: flex;
     flex-direction: column;
@@ -142,7 +142,7 @@
     align-items: center;
 }
 
-/* 气泡 (只有内容，无图标名称) */
+/* Bubble (content only, no icon or name) */
 .message-bubble {
     padding: 10px 14px;
     border-radius: 12px;
@@ -173,7 +173,7 @@
     font-size: 14px;
 }
 
-/* meta 行：时间 + 操作按钮，气泡外部下方 */
+/* Meta row: time + action buttons, below bubble */
 .message-meta {
     display: flex;
     align-items: center;
@@ -196,7 +196,7 @@
     white-space: nowrap;
 }
 
-/* 操作按钮 (拷贝 / 删除) */
+/* Action buttons (copy / delete) */
 .msg-action-btn {
     display: inline-flex;
     align-items: center;
@@ -254,7 +254,7 @@
     color: var(--text-accent);
 }
 
-/* 历史记录列表 */
+/* History list */
 .history-list-full {
     height: 100%;
     min-height: 0;
@@ -354,10 +354,10 @@
 }
 
 /* ============================================
-   第三部分: 输入界面 (固定底部约1/5高度)
-   - 高度: 固定高度，约为 sidebar 总高度的 1/5
-   - 位置: 始终位于 sidebar 最底部
-   - 特性: 不会被信息展示区挤压，始终可见
+   Part 3: Input Area (Fixed at bottom, ~1/5 height)
+   - Height: Fixed, about 1/5 of sidebar total height
+   - Position: Always at sidebar bottom
+   - Feature: Not compressed by display area, always visible
    ============================================ */
 
 .input-section {
@@ -373,7 +373,7 @@
     padding: 8px 12px;
 }
 
-/* 统一外框：包裹输入框 + 工具栏 */
+/* Unified frame: wraps input box + toolbar */
 .input-box {
     flex: 1;
     display: flex;
@@ -388,7 +388,7 @@
     border-color: var(--background-modifier-border);
 }
 
-/* 输入框（无独立边框，填充上方空间） */
+/* Input field (no independent border, fills space above) */
 .chat-input {
     flex: 1;
     width: 100%;
@@ -411,7 +411,7 @@
     color: var(--text-faint);
 }
 
-/* 工具栏（无顶部分隔线，在框内底部） */
+/* Toolbar (no top divider, at bottom inside frame) */
 .input-toolbar {
     display: flex;
     align-items: center;
@@ -421,7 +421,7 @@
     position: relative;
 }
 
-/* 工具栏按钮（无边框样式） */
+/* Toolbar button (borderless style) */
 .toolbar-btn {
     display: flex;
     align-items: center;
@@ -442,13 +442,13 @@
     color: var(--text-normal);
 }
 
-/* @ 按钮 */
+/* @ button */
 .at-btn {
     font-weight: bold;
     font-size: 14px;
 }
 
-/* 模型选择器样式 */
+/* Model selector style */
 .model-selector {
     margin-left: auto;
 }
@@ -463,7 +463,7 @@
     color: var(--text-muted);
 }
 
-/* 文件上传隐藏 input */
+/* File upload hidden input */
 .upload-wrapper {
     position: relative;
 }
@@ -478,7 +478,7 @@
     cursor: pointer;
 }
 
-/* 发送按钮 (向右箭头) - 工具栏最右侧 */
+/* Send button (right arrow) - rightmost in toolbar */
 .send-arrow-btn {
     display: inline-flex;
     align-items: center;
@@ -508,10 +508,10 @@
 }
 
 /* ============================================
-   Combobox 下拉框样式
-   - 点击弹出下拉框
-   - 下拉框获取焦点
-   - 失去焦点时自动消失
+   Combobox Dropdown Styles
+   - Click to show dropdown
+   - Dropdown gets focus
+   - Auto-hides on focus loss
    ============================================ */
 
 .combobox-dropdown {
@@ -565,7 +565,7 @@
 }
 
 /* ============================================
-   上下文标签
+   Context Tags
    ============================================ */
 
 .context-tags {
@@ -605,7 +605,7 @@
 }
 
 /* ============================================
-   响应式和滚动条
+   Responsive and Scrollbar
    ============================================ */
 
 .messages-list::-webkit-scrollbar,
@@ -630,7 +630,7 @@
 }
 
 /* ============================================
-   加载动画
+   Loading Animation
    ============================================ */
 
 .loading-dots {

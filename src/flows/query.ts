@@ -3,31 +3,31 @@
  * Semantic query against the Wiki knowledge base
  */
 
-import type { App, TFile } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '../types';
 import { getOllamaClient } from '../ollama/client';
 import { executeTool, getOllamaTools } from '../tools';
 
-const SYSTEM_PROMPT = `你是一个知识库查询助手。你的任务是回答用户的问题，并提供准确的引用来源。
+const SYSTEM_PROMPT = `You are a knowledge base query assistant. Your task is to answer user questions and provide accurate citation sources.
 
-## 工作流程
-1. 首先阅读 Wiki 索引 (index.md) 了解知识库结构
-2. 根据问题定位相关的 Wiki 页面
-3. 读取相关页面的详细内容
-4. 综合多个来源生成准确的回答
-5. 在回答中标注引用来源，使用 [[页面名]] 格式
+## Workflow
+1. First read the Wiki index (index.md) to understand the knowledge base structure
+2. Locate relevant Wiki pages based on the question
+3. Read the detailed content of relevant pages
+4. Synthesize accurate answers from multiple sources
+5. Mark citation sources in the answer using [[page name]] format
 
-## 回答规范
-- 回答要准确、简洁
-- 必须标注信息来源
-- 如果信息不确定，明确说明
-- 使用 Markdown 格式
-- 相关概念使用 [[双链]] 语法
+## Answer Guidelines
+- Answers should be accurate and concise
+- Must cite information sources
+- Clearly state if information is uncertain
+- Use Markdown format
+- Use [[wikilinks]] syntax for related concepts
 
-## 可用工具
-- read_file: 读取文件内容
-- search_files: 搜索文件内容
-- list_files: 列出目录文件`;
+## Available Tools
+- read_file: Read file contents
+- search_files: Search file contents
+- list_files: List directory files`;
 
 /**
  * Query the Wiki knowledge base
@@ -59,17 +59,17 @@ export async function queryWiki(
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `请回答以下问题：
+                content: `Please answer the following question:
 
-## 问题
+## Question
 ${question}
 
-## Wiki 索引
+## Wiki Index
 \`\`\`
-${indexContent || '(Wiki 为空)'}
+${indexContent || '(Wiki is empty)'}
 \`\`\`
 
-请先定位相关页面，然后读取内容来回答问题。`,
+Please first locate relevant pages, then read the content to answer the question.`,
             },
         ];
 
@@ -129,13 +129,13 @@ ${indexContent || '(Wiki 为空)'}
         });
 
         return {
-            answer: response.content || '无法生成回答',
+            answer: response.content || 'Unable to generate answer',
             sources: sourceTitles,
             confidence: sources.length > 0 ? 0.8 : 0.3,
         };
     } catch (error) {
         return {
-            answer: `查询失败: ${error}`,
+            answer: `Query failed: ${error}`,
             sources: [],
             confidence: 0,
         };
@@ -197,6 +197,6 @@ export async function chatWiki(
 
         return response.content;
     } catch (error) {
-        return `对话失败: ${error}`;
+        return `Conversation failed: ${error}`;
     }
 }

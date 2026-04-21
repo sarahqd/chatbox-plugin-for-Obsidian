@@ -67,7 +67,7 @@ export function getToolDescriptions(): string {
             const params = Object.entries(tool.parameters.properties)
                 .map(([key, value]) => `    - ${key}: ${value.description}`)
                 .join('\n');
-            return `- ${tool.name}: ${tool.description}\n  参数:\n${params}`;
+            return `- ${tool.name}: ${tool.description}\n  Parameters:\n${params}`;
         })
         .join('\n\n');
 }

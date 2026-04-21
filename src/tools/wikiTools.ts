@@ -105,9 +105,9 @@ export const createWikiPageTool: ToolDefinition = {
 
 # ${title}
 
-${summary ? `## 摘要\n\n${summary}\n\n` : ''}## 内容\n\n${content}
+${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
 
-${related.length > 0 ? `## 相关链接\n\n${related.map(r => `- [[${r}]]`).join('\n')}` : ''}
+${related.length > 0 ? `## Related Links\n\n${related.map(r => `- [[${r}]]`).join('\n')}` : ''}
 `;
 
         try {
@@ -329,7 +329,7 @@ export const updateIndexTool: ToolDefinition = {
             }
 
             // Generate index content
-            let indexContent = `# Wiki Index\n\n最后更新: ${new Date().toLocaleString('zh-CN')}\n\n## 页面总数\n\n${pages.length} 个页面\n\n## 目录\n\n`;
+            let indexContent = `# Wiki Index\n\nLast Updated: ${new Date().toLocaleString('en-US')}\n\n## Total Pages\n\n${pages.length} pages\n\n## Index\n\n`;
 
             for (const key of Object.keys(grouped).sort()) {
                 indexContent += `### ${key}\n\n`;
@@ -402,20 +402,20 @@ export const logOperationTool: ToolDefinition = {
         const settings = context.settings;
         const logPath = normalizePath(`${settings.wikiPath}/log.md`);
 
-        const timestamp = new Date().toLocaleString('zh-CN');
+        const timestamp = new Date().toLocaleString('en-US');
         const type = params.type as string;
         const operation = params.operation as string;
         const status = params.status as string;
         const entities = (params.entities as string)?.split(',').map(e => e.trim()).filter(Boolean) || [];
 
         const logEntry = `
-## ${timestamp} - ${type.toUpperCase()} 操作
-- **来源**: ${params.source || 'N/A'}
-- **目标**: ${params.target || 'N/A'}
-- **操作**: ${operation}
-- **实体**: ${entities.join(', ') || 'N/A'}
-- **状态**: ${status === 'success' ? '✅ 成功' : status === 'failed' ? '❌ 失败' : '⏳ 待处理'}
-${params.message ? `- **备注**: ${params.message}` : ''}
+## ${timestamp} - ${type.toUpperCase()} Operation
+- **Source**: ${params.source || 'N/A'}
+- **Target**: ${params.target || 'N/A'}
+- **Operation**: ${operation}
+- **Entities**: ${entities.join(', ') || 'N/A'}
+- **Status**: ${status === 'success' ? '✅ Success' : status === 'failed' ? '❌ Failed' : '⏳ Pending'}
+${params.message ? `- **Note**: ${params.message}` : ''}
 `;
 
         try {
@@ -424,7 +424,7 @@ ${params.message ? `- **备注**: ${params.message}` : ''}
                 const existing = await vault.read(logFile);
                 await vault.modify(logFile, existing + logEntry);
             } else {
-                const header = `# Wiki 操作日志\n\n记录所有 AI 操作的流水账。\n`;
+                const header = `# Wiki Operation Log\n\nRecords all AI operations.\n`;
                 await vault.create(logPath, header + logEntry);
             }
 

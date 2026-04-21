@@ -3,32 +3,32 @@
  * Automatic maintenance of the Wiki knowledge base
  */
 
-import type { App, TFile } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, LintResult, LintIssue } from '../types';
 import { getOllamaClient } from '../ollama/client';
 import { executeTool, getOllamaTools } from '../tools';
 
-const SYSTEM_PROMPT = `你是一个知识库维护助手。你的任务是检测和修复 Wiki 中的问题。
+const SYSTEM_PROMPT = `You are a knowledge base maintenance assistant. Your task is to detect and fix issues in the Wiki.
 
-## 检查项目
-1. **断链检测**: 检查 [[双链]] 是否指向不存在的页面
-2. **矛盾检测**: 检查不同页面间是否存在矛盾的陈述
-3. **重复检测**: 检查是否存在内容重复的页面
-4. **过期检测**: 检查是否有长时间未更新的页面
+## Check Items
+1. **Broken link detection**: Check if [[wikilinks]] point to non-existent pages
+2. **Contradiction detection**: Check if there are contradictory statements between different pages
+3. **Duplicate detection**: Check if there are pages with duplicate content
+4. **Stale detection**: Check if there are pages that haven't been updated for a long time
 
-## 修复原则
-- 修复断链：创建缺失页面或移除链接
-- 解决矛盾：标记矛盾并建议合并
-- 合并重复：保留更完整的版本
-- 更新过期：标记需要更新的页面
+## Fix Principles
+- Fix broken links: Create missing pages or remove links
+- Resolve contradictions: Mark contradictions and suggest merging
+- Merge duplicates: Keep the more complete version
+- Update stale: Mark pages that need updating
 
-## 可用工具
-- read_file: 读取文件内容
-- write_file: 写入文件
-- list_files: 列出目录文件
-- search_files: 搜索文件内容
-- update_wiki_page: 更新 Wiki 页面
-- log_operation: 记录操作日志`;
+## Available Tools
+- read_file: Read file contents
+- write_file: Write to file
+- list_files: List directory files
+- search_files: Search file contents
+- update_wiki_page: Update Wiki page
+- log_operation: Log operation record`;
 
 /**
  * Run lint checks on the Wiki
@@ -51,7 +51,7 @@ export async function lintWiki(
 
     try {
         // Step 1: Get all Wiki pages
-        onProgress?.('正在扫描 Wiki 目录...');
+        onProgress?.('Scanning Wiki directory...');
         const wikiFiles = app.vault.getMarkdownFiles().filter(
             (file) => file.path.startsWith(settings.wikiPath) && 
                      !file.path.endsWith('index.md') && 
@@ -59,7 +59,7 @@ export async function lintWiki(
         );
 
         // Step 2: Check for broken links
-        onProgress?.('正在检查断链...');
+        onProgress?.('Checking broken links...');
         const pageNames = new Set(
             wikiFiles.map((f) => f.basename)
         );
@@ -74,15 +74,15 @@ export async function lintWiki(
                     issues.push({
                         type: 'broken_link',
                         path: file.path,
-                        description: `断链: [[${linkTarget}]] 不存在`,
-                        suggestion: `创建页面 "${linkTarget}" 或移除链接`,
+                        description: `Broken link: [[${linkTarget}]] does not exist`,
+                        suggestion: `Create page "${linkTarget}" or remove the link`,
                     });
                 }
             }
         }
 
         // Step 3: Check for stale pages (not updated in 30 days)
-        onProgress?.('正在检查过期页面...');
+        onProgress?.('Checking stale pages...');
         const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
         
         for (const file of wikiFiles) {
@@ -90,15 +90,15 @@ export async function lintWiki(
                 issues.push({
                     type: 'stale',
                     path: file.path,
-                    description: `页面超过 30 天未更新`,
-                    suggestion: `检查内容是否需要更新`,
+                    description: `Page not updated for over 30 days`,
+                    suggestion: `Check if content needs updating`,
                 });
             }
         }
 
         // Step 4: Use LLM for advanced checks (contradictions, duplicates)
         if (wikiFiles.length > 0) {
-            onProgress?.('正在进行智能检测...');
+            onProgress?.('Running intelligent detection...');
             
             const indexPath = `${settings.wikiPath}/index.md`;
             const indexFile = app.vault.getAbstractFileByPath(indexPath);
@@ -110,22 +110,22 @@ export async function lintWiki(
             const messages: OllamaMessage[] = [
                 {
                     role: 'user',
-                    content: `请检查以下 Wiki 是否存在问题：
+                    content: `Please check if the following Wiki has any issues:
 
-## Wiki 索引
+## Wiki Index
 \`\`\`
 ${indexContent}
 \`\`\`
 
-## 已检测问题
-${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '(无)'}
+## Detected Issues
+${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '(None)'}
 
-请检查是否存在：
-1. 内容重复的页面
-2. 相互矛盾的陈述
-3. 其他潜在问题
+Please check for:
+1. Pages with duplicate content
+2. Contradictory statements
+3. Other potential issues
 
-如果发现问题，请使用工具记录或修复。`,
+If issues are found, please use tools to record or fix them.`,
                 },
             ];
 
@@ -139,7 +139,7 @@ ${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '
 
                 if (response.toolCalls && response.toolCalls.length > 0) {
                     for (const toolCall of response.toolCalls) {
-                        onProgress?.(`执行: ${toolCall.function.name}`);
+                        onProgress?.(`Executing: ${toolCall.function.name}`);
                         
                         const result = await executeTool(
                             toolCall.function.name,
@@ -175,9 +175,9 @@ ${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '
             'log_operation',
             {
                 type: 'lint',
-                operation: 'Wiki 维护检查',
+                operation: 'Wiki maintenance check',
                 status: 'success',
-                message: `发现 ${issues.length} 个问题，修复了 ${fixed} 个`,
+                message: `Found ${issues.length} issues, fixed ${fixed} of them`,
             },
             context
         );
@@ -192,7 +192,7 @@ ${issues.map((i) => `- [${i.type}] ${i.path}: ${i.description}`).join('\n') || '
             issues: [{
                 type: 'broken_link',
                 path: '',
-                description: `检查失败: ${error}`,
+                description: `Check failed: ${error}`,
             }],
             fixed: 0,
             pending: 0,
@@ -217,26 +217,26 @@ export async function fixLintIssue(
     };
 
     try {
-        onProgress?.(`正在修复: ${issue.description}`);
+        onProgress?.(`Fixing: ${issue.description}`);
 
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `请修复以下问题：
+                content: `Please fix the following issue:
 
-## 问题类型
+## Issue Type
 ${issue.type}
 
-## 问题位置
+## Issue Location
 ${issue.path}
 
-## 问题描述
+## Issue Description
 ${issue.description}
 
-## 建议
-${issue.suggestion || '无'}
+## Suggestion
+${issue.suggestion || 'None'}
 
-请使用工具修复这个问题。`,
+Please use tools to fix this issue.`,
             },
         ];
 

@@ -73,13 +73,13 @@ export class OllamaClient {
             ? [{ role: 'system' as const, content: systemPrompt }, ...messages]
             : messages;
 
-        // 转换消息格式：将 toolCalls 转换为 tool_calls (Ollama API 格式)
+        // Convert message format: toolCalls -> tool_calls (Ollama API format)
         const formattedMessages = allMessages.map(msg => {
             const formatted: Record<string, unknown> = {
                 role: msg.role,
                 content: msg.content || '',
             };
-            // 转换 toolCalls -> tool_calls
+            // Convert toolCalls -> tool_calls
             if (msg.toolCalls && msg.toolCalls.length > 0) {
                 formatted.tool_calls = msg.toolCalls.map(tc => ({
                     id: tc.id,
@@ -90,7 +90,7 @@ export class OllamaClient {
                     },
                 }));
             }
-            // 保留 toolCallId 用于 tool 角色消息
+            // Keep toolCallId for tool role messages
             if (msg.toolCallId) {
                 formatted.tool_call_id = msg.toolCallId;
             }

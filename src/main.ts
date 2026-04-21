@@ -35,7 +35,7 @@ export default class LLMWikiPlugin extends Plugin {
         // Add commands
         this.addCommand({
             id: 'open-chat',
-            name: '打开聊天对话框',
+            name: 'Open chat dialog',
             hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'l' }],
             callback: () => {
                 this.activateView();
@@ -44,7 +44,7 @@ export default class LLMWikiPlugin extends Plugin {
 
         this.addCommand({
             id: 'ingest-current',
-            name: '摄取当前文件到 Wiki',
+            name: 'Ingest current file to Wiki',
             callback: () => {
                 this.ingestCurrentFile();
             },
@@ -52,7 +52,7 @@ export default class LLMWikiPlugin extends Plugin {
 
         this.addCommand({
             id: 'ingest-clipboard',
-            name: '摄取剪贴板内容到 Wiki',
+            name: 'Ingest clipboard content to Wiki',
             callback: () => {
                 this.ingestClipboard();
             },
@@ -60,7 +60,7 @@ export default class LLMWikiPlugin extends Plugin {
 
         this.addCommand({
             id: 'query',
-            name: '查询 Wiki',
+            name: 'Query Wiki',
             callback: () => {
                 this.activateView();
             },
@@ -68,7 +68,7 @@ export default class LLMWikiPlugin extends Plugin {
 
         this.addCommand({
             id: 'lint',
-            name: '执行 Wiki 维护检查',
+            name: 'Run Wiki maintenance check',
             callback: () => {
                 this.runLint();
             },
@@ -76,7 +76,7 @@ export default class LLMWikiPlugin extends Plugin {
 
         this.addCommand({
             id: 'reindex',
-            name: '重建 Wiki 索引',
+            name: 'Rebuild Wiki index',
             callback: () => {
                 this.reindexWiki();
             },
@@ -151,66 +151,66 @@ export default class LLMWikiPlugin extends Plugin {
         const isHealthy = await client.healthCheck();
         
         if (!isHealthy) {
-            new Notice('⚠️ 无法连接到 Ollama。请确保 Ollama 正在运行。', 5000);
+            new Notice('⚠️ Cannot connect to Ollama. Please ensure Ollama is running.', 5000);
         }
     }
 
     async ingestCurrentFile() {
         const activeFile = this.app.workspace.getActiveFile();
         if (!activeFile) {
-            new Notice('没有打开的文件');
+            new Notice('No file open');
             return;
         }
 
-        new Notice('开始摄取文件...');
+        new Notice('Starting file ingestion...');
 
         const result = await ingestFile(this.app, this.settings, activeFile.path, (msg) => {
             console.log('Ingest:', msg);
         });
 
         if (result.success) {
-            new Notice(`✅ 摄取成功: ${result.entities.length} 个实体`);
+            new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
         } else {
-            new Notice(`❌ 摄取失败: ${result.message}`);
+            new Notice(`❌ Ingestion failed: ${result.message}`);
         }
     }
 
     async ingestClipboard() {
         const content = await navigator.clipboard.readText();
         if (!content) {
-            new Notice('剪贴板为空');
+            new Notice('Clipboard is empty');
             return;
         }
 
-        new Notice('开始摄取内容...');
+        new Notice('Starting content ingestion...');
 
         const result = await ingestContent(this.app, this.settings, content, undefined, (msg) => {
             console.log('Ingest:', msg);
         });
 
         if (result.success) {
-            new Notice(`✅ 摄取成功: ${result.entities.length} 个实体`);
+            new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
         } else {
-            new Notice(`❌ 摄取失败: ${result.message}`);
+            new Notice(`❌ Ingestion failed: ${result.message}`);
         }
     }
 
     async runLint() {
-        new Notice('开始 Wiki 维护检查...');
+        new Notice('Starting Wiki maintenance check...');
 
         const result = await lintWiki(this.app, this.settings, false, (msg) => {
             console.log('Lint:', msg);
         });
 
         if (result.issues.length === 0) {
-            new Notice('✅ Wiki 状态良好，无问题发现');
+            new Notice('✅ Wiki is in good condition, no issues found');
         } else {
-            new Notice(`发现 ${result.issues.length} 个问题，已修复 ${result.fixed} 个`);
+            new Notice(`Found ${result.issues.length} issues, fixed ${result.fixed} of them`);
         }
     }
 
     async reindexWiki() {
-        new Notice('正在重建 Wiki 索引...');
+        new Notice('Rebuilding Wiki index...');
 
         // Use the update_index tool
         const { executeTool } = await import('./tools');
@@ -223,9 +223,9 @@ export default class LLMWikiPlugin extends Plugin {
         const result = await executeTool('update_index', {}, context);
 
         if (result.success) {
-            new Notice(`✅ 索引重建成功: ${(result.data as any).pageCount} 个页面`);
+            new Notice(`✅ Index rebuild successful: ${(result.data as any).pageCount} pages`);
         } else {
-            new Notice(`❌ 索引重建失败: ${result.error}`);
+            new Notice(`❌ Index rebuild failed: ${result.error}`);
         }
     }
 }
@@ -245,14 +245,14 @@ class LLMWikiSettingTab extends PluginSettingTab {
         const { containerEl } = this;
 
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'LLM Wiki 设置' });
+        containerEl.createEl('h2', { text: 'LLM Wiki Settings' });
 
         // Ollama Settings
-        containerEl.createEl('h3', { text: 'Ollama 配置' });
+        containerEl.createEl('h3', { text: 'Ollama Configuration' });
 
         new Setting(containerEl)
             .setName('Ollama URL')
-            .setDesc('Ollama API 地址')
+            .setDesc('Ollama API address')
             .addText((text) =>
                 text
                     .setPlaceholder('http://localhost:11434')
@@ -264,8 +264,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('模型')
-            .setDesc('使用的 Ollama 模型名称')
+            .setName('Model')
+            .setDesc('Ollama model name to use')
             .addText((text) =>
                 text
                     .setPlaceholder('llama3.2')
@@ -277,11 +277,11 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         // Path Settings
-        containerEl.createEl('h3', { text: '目录配置' });
+        containerEl.createEl('h3', { text: 'Directory Configuration' });
 
         new Setting(containerEl)
-            .setName('Wiki 目录')
-            .setDesc('Wiki 页面存储目录')
+            .setName('Wiki Directory')
+            .setDesc('Wiki page storage directory')
             .addText((text) =>
                 text
                     .setPlaceholder('Wiki')
@@ -293,8 +293,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('Sources 目录')
-            .setDesc('原始资料存储目录')
+            .setName('Sources Directory')
+            .setDesc('Source material storage directory')
             .addText((text) =>
                 text
                     .setPlaceholder('Sources')
@@ -306,8 +306,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('Templates 目录')
-            .setDesc('模板文件存储目录')
+            .setName('Templates Directory')
+            .setDesc('Template file storage directory')
             .addText((text) =>
                 text
                     .setPlaceholder('Templates')
@@ -319,11 +319,11 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         // Chat Settings
-        containerEl.createEl('h3', { text: '聊天配置' });
+        containerEl.createEl('h3', { text: 'Chat Configuration' });
 
         new Setting(containerEl)
-            .setName('自动保存聊天')
-            .setDesc('自动将聊天记录保存到 Sources 目录')
+            .setName('Auto-save Chat')
+            .setDesc('Automatically save chat history to Sources directory')
             .addToggle((toggle) =>
                 toggle
                     .setValue(this.plugin.settings.autoSaveChat || false)
@@ -334,8 +334,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('最大上下文长度')
-            .setDesc('上下文最大 token 数量')
+            .setName('Maximum Context Length')
+            .setDesc('Maximum context token count')
             .addSlider((slider) =>
                 slider
                     .setLimits(1000, 32000, 1000)
@@ -348,11 +348,11 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         // Automation Settings
-        containerEl.createEl('h3', { text: '自动化配置' });
+        containerEl.createEl('h3', { text: 'Automation Configuration' });
 
         new Setting(containerEl)
-            .setName('自动摄取')
-            .setDesc('自动摄取放入 Sources 目录的新文件')
+            .setName('Auto-ingest')
+            .setDesc('Automatically ingest new files placed in Sources directory')
             .addToggle((toggle) =>
                 toggle
                     .setValue(this.plugin.settings.autoIngest)
@@ -363,8 +363,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('自动维护')
-            .setDesc('定期执行 Wiki 维护检查')
+            .setName('Auto-maintenance')
+            .setDesc('Periodically run Wiki maintenance checks')
             .addToggle((toggle) =>
                 toggle
                     .setValue(this.plugin.settings.autoLint)
@@ -375,8 +375,8 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('维护间隔')
-            .setDesc('自动维护检查间隔（分钟）')
+            .setName('Maintenance Interval')
+            .setDesc('Auto maintenance check interval (minutes)')
             .addSlider((slider) =>
                 slider
                     .setLimits(10, 120, 10)

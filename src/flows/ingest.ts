@@ -3,39 +3,39 @@
  * Incremental ingestion of new documents into the Wiki
  */
 
-import type { App, TFile } from 'obsidian';
+import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, IngestResult } from '../types';
 import { getOllamaClient } from '../ollama/client';
 import { executeTool, getOllamaTools } from '../tools';
 
-const SYSTEM_PROMPT = `你是一个知识库管理助手。你的任务是将新的文档内容整合到现有的 Wiki 知识库中。
+const SYSTEM_PROMPT = `You are a knowledge base management assistant. Your task is to integrate new document content into the existing Wiki knowledge base.
 
-## 工作流程
-1. 分析新文档，提取关键信息、实体和概念
-2. 检查 Wiki 索引，查找相关联的现有页面
-3. 决定是创建新页面还是更新现有页面
-4. 使用提供的工具执行文件操作
-5. 确保添加适当的 [[双向链接]]
+## Workflow
+1. Analyze new documents, extract key information, entities and concepts
+2. Check Wiki index, find related existing pages
+3. Decide whether to create new pages or update existing ones
+4. Use the provided tools to perform file operations
+5. Ensure appropriate [[bidirectional links]] are added
 
-## Wiki 页面规范
-- 每个页面必须有 YAML frontmatter
-- 使用 [[双链]] 语法连接相关概念
-- 保持内容简洁、结构化
-- 为每个页面提供简短摘要
+## Wiki Page Standards
+- Each page must have YAML frontmatter
+- Use [[wikilinks]] syntax to connect related concepts
+- Keep content concise and structured
+- Provide a brief summary for each page
 
-## 可用工具
-你可以使用以下工具来操作文件和 Wiki：
-- read_file: 读取文件内容
-- write_file: 写入文件
-- list_files: 列出目录文件
-- search_files: 搜索文件内容
-- create_wiki_page: 创建新的 Wiki 页面
-- update_wiki_page: 更新现有 Wiki 页面
-- add_backlink: 添加双向链接
-- update_index: 更新 Wiki 索引
-- log_operation: 记录操作日志
+## Available Tools
+You can use the following tools to manipulate files and Wiki:
+- read_file: Read file contents
+- write_file: Write to file
+- list_files: List directory files
+- search_files: Search file contents
+- create_wiki_page: Create new Wiki page
+- update_wiki_page: Update existing Wiki page
+- add_backlink: Add bidirectional link
+- update_index: Update Wiki index
+- log_operation: Log operation record
 
-请根据需要调用这些工具来完成任务。`;
+Please call these tools as needed to complete the task.`;
 
 /**
  * Ingest a file into the Wiki
@@ -55,7 +55,7 @@ export async function ingestFile(
 
     try {
         // Step 1: Read the source file
-        onProgress?.(`正在读取文件: ${filePath}`);
+        onProgress?.(`Reading file: ${filePath}`);
         const file = app.vault.getAbstractFileByPath(filePath);
         if (!(file instanceof TFile)) {
             return {
@@ -63,7 +63,7 @@ export async function ingestFile(
                 sourcePath: filePath,
                 operation: 'skip',
                 entities: [],
-                message: '文件不存在',
+                message: 'File does not exist',
             };
         }
 
@@ -78,26 +78,26 @@ export async function ingestFile(
         }
 
         // Step 3: Ask LLM to process the document
-        onProgress?.('正在分析文档内容...');
+        onProgress?.('Analyzing document content...');
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `请将以下文档内容整合到 Wiki 中。
+                content: `Please integrate the following document content into the Wiki.
 
-## 源文件路径
+## Source File Path
 ${filePath}
 
-## 文档内容
+## Document Content
 \`\`\`
 ${content}
 \`\`\`
 
-## 当前 Wiki 索引
+## Current Wiki Index
 \`\`\`
-${indexContent || '(Wiki 为空)'}
+${indexContent || '(Wiki is empty)'}
 \`\`\`
 
-请分析文档，提取关键实体和概念，并创建或更新相应的 Wiki 页面。`,
+Please analyze the document, extract key entities and concepts, and create or update corresponding Wiki pages.`,
             },
         ];
 
@@ -114,7 +114,7 @@ ${indexContent || '(Wiki 为空)'}
             if (response.toolCalls && response.toolCalls.length > 0) {
                 // Process tool calls
                 for (const toolCall of response.toolCalls) {
-                    onProgress?.(`执行工具: ${toolCall.function.name}`);
+                    onProgress?.(`Executing tool: ${toolCall.function.name}`);
                     
                     const result = await executeTool(
                         toolCall.function.name,
@@ -150,7 +150,7 @@ ${indexContent || '(Wiki 为空)'}
         }
 
         // Step 5: Update the Wiki index
-        onProgress?.('正在更新 Wiki 索引...');
+        onProgress?.('Updating Wiki index...');
         await executeTool('update_index', {}, context);
 
         // Step 6: Log the operation
@@ -159,10 +159,10 @@ ${indexContent || '(Wiki 为空)'}
             {
                 type: 'ingest',
                 source: filePath,
-                operation: '文档摄取',
+                operation: 'Document ingestion',
                 entities: entities.join(','),
                 status: 'success',
-                message: `成功摄取文档，创建了 ${entities.length} 个页面`,
+                message: `Successfully ingested document, created ${entities.length} pages`,
             },
             context
         );
@@ -172,7 +172,7 @@ ${indexContent || '(Wiki 为空)'}
             sourcePath: filePath,
             operation: entities.length > 0 ? 'create' : 'update',
             entities,
-            message: `成功摄取文档，提取了 ${entities.length} 个实体`,
+            message: `Successfully ingested document, extracted ${entities.length} entities`,
         };
     } catch (error) {
         return {
@@ -211,23 +211,23 @@ export async function ingestContent(
             indexContent = await app.vault.read(indexFile);
         }
 
-        onProgress?.('正在分析内容...');
+        onProgress?.('Analyzing content...');
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `请将以下内容整合到 Wiki 中。
+                content: `Please integrate the following content into the Wiki.
 
-${title ? `## 标题\n${title}\n\n` : ''}## 内容
+${title ? `## Title\n${title}\n\n` : ''}## Content
 \`\`\`
 ${content}
 \`\`\`
 
-## 当前 Wiki 索引
+## Current Wiki Index
 \`\`\`
-${indexContent || '(Wiki 为空)'}
+${indexContent || '(Wiki is empty)'}
 \`\`\`
 
-请分析内容，提取关键实体和概念，并创建或更新相应的 Wiki 页面。`,
+Please analyze the content, extract key entities and concepts, and create or update corresponding Wiki pages.`,
             },
         ];
 
@@ -242,7 +242,7 @@ ${indexContent || '(Wiki 为空)'}
 
             if (response.toolCalls && response.toolCalls.length > 0) {
                 for (const toolCall of response.toolCalls) {
-                    onProgress?.(`执行工具: ${toolCall.function.name}`);
+                    onProgress?.(`Executing tool: ${toolCall.function.name}`);
                     
                     const result = await executeTool(
                         toolCall.function.name,
@@ -279,25 +279,25 @@ ${indexContent || '(Wiki 为空)'}
             'log_operation',
             {
                 type: 'ingest',
-                operation: '内容摄取',
+                operation: 'Content ingestion',
                 entities: entities.join(','),
                 status: 'success',
-                message: `成功摄取内容，创建了 ${entities.length} 个页面`,
+                message: `Successfully ingested content, created ${entities.length} pages`,
             },
             context
         );
 
         return {
             success: true,
-            sourcePath: '(剪贴板)',
+            sourcePath: '(Clipboard)',
             operation: entities.length > 0 ? 'create' : 'update',
             entities,
-            message: `成功摄取内容，提取了 ${entities.length} 个实体`,
+            message: `Successfully ingested content, extracted ${entities.length} entities`,
         };
     } catch (error) {
         return {
             success: false,
-            sourcePath: '(剪贴板)',
+            sourcePath: '(Clipboard)',
             operation: 'skip',
             entities: [],
             message: String(error),
