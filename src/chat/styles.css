@@ -93,6 +93,38 @@
     pointer-events: none;
 }
 
+/* Icon button style - no border */
+.icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: background 0.15s, color 0.15s;
+    outline: none;
+}
+
+.icon-btn:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--text-normal);
+}
+
+.icon-btn:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+.icon-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
 /* ============================================
    Part 2: Information Display Area (Flexible height, scrollable)
    - Height: Flexible, fills space between header and input
@@ -150,8 +182,9 @@
 }
 
 .message-bubble.user {
-    background: var(--interactive-accent);
-    color: var(--text-on-accent);
+    background: var(--background-secondary);
+    color: var(--text-normal);
+    border: 1px solid var(--background-modifier-border);
     border-bottom-right-radius: 4px;
 }
 
@@ -507,6 +540,51 @@
     transform: scale(0.92);
 }
 
+/* Stop button (shown during LLM response) */
+.stop-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    margin-left: 4px;
+    border: none;
+    border-radius: 6px;
+    background: var(--text-error);
+    color: white;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s, transform 0.1s;
+}
+
+.stop-btn:hover {
+    background: #c0392b;
+}
+
+.stop-btn:active {
+    transform: scale(0.92);
+}
+
+.stop-btn img {
+    width: 14px;
+    height: 14px;
+}
+
+/* Context tags above input (inside border) */
+.context-tags-above-input {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    max-height: 80px;
+    overflow-y: auto;
+}
+
+.context-tags-above-input:empty {
+    display: none;
+}
+
 /* ============================================
    Combobox Dropdown Styles
    - Click to show dropdown
@@ -564,10 +642,64 @@
     border-radius: 0 0 6px 6px;
 }
 
+.dropdown-divider {
+    height: 1px;
+    background: var(--background-modifier-border);
+    margin: 4px 0;
+}
+
 /* ============================================
-   Context Tags
+   Context Tags Area (above input, variable height)
    ============================================ */
 
+.context-tags-area {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    max-height: 80px;
+    overflow-y: auto;
+}
+
+.context-tags-area.hidden {
+    display: none;
+}
+
+.context-tags-area:empty {
+    display: none;
+}
+
+/* Context tag style */
+.context-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: transparent;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+/* Remove button (X) - no background */
+.tag-remove {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0 0 0 4px;
+    font-size: 10px;
+    opacity: 0.6;
+    color: inherit;
+    line-height: 1;
+}
+
+.tag-remove:hover {
+    opacity: 1;
+}
+
+/* Legacy context-tags (in toolbar) - keep for compatibility */
 .context-tags {
     display: flex;
     flex-wrap: wrap;
@@ -580,27 +712,17 @@
     display: none;
 }
 
-.context-tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    background: var(--interactive-accent-hover);
-    border-radius: 12px;
-    font-size: 11px;
-}
-
-.tag-remove {
+.tag-edit {
     background: none;
     border: none;
     cursor: pointer;
-    padding: 0 0 0 4px;
+    padding: 0 2px;
     font-size: 10px;
-    opacity: 0.7;
+    opacity: 0.6;
     color: inherit;
 }
 
-.tag-remove:hover {
+.tag-edit:hover {
     opacity: 1;
 }
 
@@ -653,6 +775,295 @@
 @keyframes bounce {
     0%, 80%, 100% { transform: scale(0); }
     40% { transform: scale(1); }
+}
+
+/* ============================================
+   File Selector Styles
+   ============================================ */
+
+.file-selector-container,
+.snippet-selector-container {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    margin-bottom: 8px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-s);
+    z-index: 100;
+    max-height: 300px;
+    overflow: hidden;
+}
+
+.file-selector-container.hidden,
+.snippet-selector-container.hidden {
+    display: none;
+}
+
+.file-selector {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+.file-selector-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--background-secondary);
+    border-bottom: 1px solid var(--background-modifier-border);
+    font-size: 12px;
+}
+
+.file-selector-path {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.file-selector-filter {
+    color: var(--text-accent);
+    margin-left: 8px;
+}
+
+.file-selector-list {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 250px;
+}
+
+.file-selector-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.file-selector-item:hover {
+    background: var(--background-modifier-hover);
+}
+
+.file-selector-item.selected {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.file-selector-item.folder {
+    color: var(--text-muted);
+}
+
+.file-selector-item.selected.folder {
+    color: var(--text-on-accent);
+}
+
+.file-selector-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.file-selector-name {
+    flex: 1;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-selector-path-hint {
+    font-size: 11px;
+    color: var(--text-faint);
+    opacity: 0.7;
+}
+
+.file-selector-item.selected .file-selector-path-hint {
+    color: var(--text-on-accent);
+    opacity: 0.8;
+}
+
+.file-selector-footer {
+    padding: 6px 12px;
+    border-top: 1px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+}
+
+.file-selector-hint {
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.file-selector-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* ============================================
+   Snippet Selector Styles
+   ============================================ */
+
+.snippet-selector {
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+    gap: 12px;
+}
+
+.snippet-selector-header {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-normal);
+}
+
+.snippet-selector-range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.snippet-range-input {
+    width: 60px;
+    padding: 4px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 12px;
+}
+
+.snippet-range-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+}
+
+.snippet-selector-preview {
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 4px;
+    background: var(--background-secondary);
+    font-family: var(--font-monospace);
+    font-size: 11px;
+}
+
+.snippet-line {
+    display: flex;
+    gap: 8px;
+    padding: 2px 4px;
+}
+
+.snippet-line:hover {
+    background: var(--background-modifier-hover);
+}
+
+.snippet-line-num {
+    color: var(--text-faint);
+    min-width: 24px;
+    text-align: right;
+    user-select: none;
+}
+
+.snippet-line-content {
+    color: var(--text-muted);
+    white-space: pre;
+}
+
+.snippet-selector-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.snippet-btn {
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.snippet-btn-cancel {
+    background: var(--background-modifier-hover);
+    border: 1px solid var(--background-modifier-border);
+    color: var(--text-normal);
+}
+
+.snippet-btn-cancel:hover {
+    background: var(--background-modifier-border);
+}
+
+.snippet-btn-confirm {
+    background: var(--interactive-accent);
+    border: none;
+    color: var(--text-on-accent);
+}
+
+.snippet-btn-confirm:hover {
+    background: var(--interactive-accent-hover);
+}
+
+/* ============================================
+   Code Block Styles
+   ============================================ */
+
+.code-block {
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: var(--font-monospace);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.code-block code {
+    background: transparent;
+    padding: 0;
+    font-family: inherit;
+    color: var(--text-normal);
+}
+
+.code-block[data-lang]::before {
+    content: attr(data-lang);
+    display: block;
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    font-weight: 500;
+}
+
+.inline-code {
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: var(--font-monospace);
+    font-size: 0.9em;
+    color: var(--text-accent);
+}
+
+/* ============================================
+   Context Tag with Link Styles
+   ============================================ */
+
+.context-tag {
+    cursor: pointer;
+}
+
+.context-tag:hover {
+    opacity: 0.9;
+}
+
+.context-tag .wiki-link {
+    font-size: inherit;
 }
 
 /* ============================================

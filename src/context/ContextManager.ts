@@ -135,6 +135,43 @@ export class ContextManager {
     }
 
     /**
+     * Add snippet context (partial file content)
+     */
+    addSnippetContext(
+        name: string,
+        content: string,
+        path: string,
+        startLine: number,
+        endLine: number
+    ): ChatContext {
+        const tokens = estimateTokens(content);
+        const link = `[[${path}|${name}]]`;
+        
+        const context: ChatContext = {
+            id: `snippet-${path}-L${startLine}-L${endLine}-${Date.now()}`,
+            type: 'snippet',
+            name: name,
+            path: path,
+            content: content,
+            tokens: tokens,
+            link: link,
+            startLine: startLine,
+            endLine: endLine
+        };
+
+        this.contexts.set(context.id, context);
+        return context;
+    }
+
+    /**
+     * Add context with link (generic method)
+     */
+    addContextWithContext(context: ChatContext): ChatContext {
+        this.contexts.set(context.id, context);
+        return context;
+    }
+
+    /**
      * Add current active file as context
      */
     async addActiveFileContext(): Promise<ChatContext | null> {
@@ -217,12 +254,25 @@ export class ContextManager {
         const parts: string[] = ['Here is the relevant context information:\n'];
 
         contexts.forEach((context, index) => {
-            parts.push(`--- Context ${index + 1}: ${context.name} ---`);
+            // Include file path and link for better context identification
+            const fileInfo = context.path ? ` (path: ${context.path})` : '';
+            const linkInfo = context.link ? ` [link: ${context.link}]` : '';
+            
+            parts.push(`=== Context ${index + 1}: ${context.name}${fileInfo}${linkInfo} ===`);
+            
+            // For snippet type, include line range info
+            if (context.type === 'snippet' && context.startLine && context.endLine) {
+                parts.push(`[Lines ${context.startLine} - ${context.endLine}]`);
+            }
+            
+            parts.push('');
             parts.push(context.content);
+            parts.push('');
+            parts.push(`=== End of Context ${index + 1} ===`);
             parts.push('');
         });
 
-        parts.push('---\nPlease answer the user\'s question based on the above context.\n');
+        parts.push('Please answer the user\'s question based on the above context information.');
 
         return parts.join('\n');
     }

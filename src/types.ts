@@ -222,11 +222,23 @@ export interface LintResult {
 // Context type
 export interface ChatContext {
     id: string;
-    type: 'file' | 'wiki' | 'folder' | 'text';
+    type: 'file' | 'wiki' | 'folder' | 'text' | 'snippet';
     name: string;
     path?: string;
     content: string;
     tokens: number;
+    // Obsidian internal link format: [[path]] or [[path|display]]
+    link?: string;
+    // For snippet type: line range
+    startLine?: number;
+    endLine?: number;
+}
+
+// File reference in message (parsed from [[file]] syntax)
+export interface FileReference {
+    path: string;
+    displayName?: string;
+    fullMatch: string;
 }
 
 export interface ChatMessage {

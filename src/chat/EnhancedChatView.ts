@@ -10,11 +10,21 @@
 
 import { ItemView, WorkspaceLeaf, Notice, TFile } from 'obsidian';
 import './styles.css';
-import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall, ModelConfig } from '../types';
+import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall, ModelConfig, FileReference } from '../types';
 import { ContextManager, getAvailableContextSources } from '../context/ContextManager';
 import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
+import { 
+    FileSelector, 
+    SnippetSelector, 
+    FileItem, 
+    addFileWithContext, 
+    addSnippetContext,
+    addSelectionAsContext,
+    parseFileReferences,
+    createInternalLink
+} from '../context/FileSelector';
 
 const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
 
@@ -33,6 +43,7 @@ export class EnhancedChatView extends ItemView {
     private modelDropdownEl: HTMLElement | null = null;
     private contextTagsEl: HTMLElement | null = null;
     private modelLabelEl: HTMLElement | null = null;
+    private sendBtnEl: HTMLElement | null = null;
     
     // Managers
     private contextManager: ContextManager | null = null;
@@ -46,6 +57,13 @@ export class EnhancedChatView extends ItemView {
     private availableModels: string[] = [];
     private contextSources: { type: string; name: string; path: string }[] = [];
     private displayMode: DisplayMode = 'chat';
+    
+    // File selector
+    private fileSelectorEl: HTMLElement | null = null;
+    private fileSelector: FileSelector | null = null;
+    private snippetSelectorEl: HTMLElement | null = null;
+    private snippetSelector: SnippetSelector | null = null;
+    private fileSelectorVisible: boolean = false;
 
     constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
         super(leaf);
@@ -111,22 +129,22 @@ export class EnhancedChatView extends ItemView {
         // Left: Title
         header.createSpan({ text: 'LLM Wiki', cls: 'header-title' });
 
-        // Right: Button group (flat style)
+        // Right: Button group (icon style)
         const btnGroup = header.createDiv({ cls: 'header-btn-group' });
 
-        // New chat button
-        const newChatBtn = btnGroup.createEl('button', { cls: 'flat-btn', attr: { title: 'New Chat' } });
-        newChatBtn.setText('New');
+        // New chat button (trash icon for clearing)
+        const newChatBtn = btnGroup.createEl('button', { cls: 'icon-btn', attr: { title: 'New Chat' } });
+        newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>';
         newChatBtn.onClickEvent(() => this.newChat());
 
-        // Chat history button
-        const historyBtn = btnGroup.createEl('button', { cls: 'flat-btn', attr: { title: 'Chat History' } });
-        historyBtn.setText('History');
+        // Chat history button (clock icon)
+        const historyBtn = btnGroup.createEl('button', { cls: 'icon-btn', attr: { title: 'Chat History' } });
+        historyBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>';
         historyBtn.onClickEvent(() => this.toggleDisplayMode('history'));
 
-        // Save chat button
-        const saveBtn = btnGroup.createEl('button', { cls: 'flat-btn', attr: { title: 'Save Chat' } });
-        saveBtn.setText('Save');
+        // Save chat button (save icon)
+        const saveBtn = btnGroup.createEl('button', { cls: 'icon-btn', attr: { title: 'Save Chat' } });
+        saveBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>';
         saveBtn.onClickEvent(() => this.saveChat());
     }
 
@@ -285,6 +303,54 @@ export class EnhancedChatView extends ItemView {
                 this.inputEl!.value = '';
             }
         });
+        
+        // @ trigger for file selector
+        this.inputEl.addEventListener('input', (e) => {
+            const value = this.inputEl!.value;
+            const cursorPos = this.inputEl!.selectionStart || 0;
+            
+            // Check if user typed @
+            if (value[cursorPos - 1] === '@') {
+                // Check if @ is at start or preceded by whitespace/newline
+                if (cursorPos === 1 || /[\s\n]/.test(value[cursorPos - 2])) {
+                    this.showFileSelector();
+                }
+            }
+        });
+        
+        // Handle keyboard navigation for file selector
+        this.inputEl.addEventListener('keydown', (e) => {
+            if (this.fileSelectorVisible && this.fileSelector) {
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    this.fileSelector.selectPrevious();
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    this.fileSelector.selectNext();
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    this.fileSelector.confirmSelection();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this.hideFileSelector();
+                }
+            }
+        });
+
+        // File selector container
+        this.fileSelectorEl = inputSection.createDiv({ cls: 'file-selector-container hidden' });
+        this.fileSelector = new FileSelector(
+            this.app,
+            this.fileSelectorEl,
+            (item: FileItem) => this.handleFileSelect(item),
+            (filePath: string, startLine: number, endLine: number) => this.handleSnippetConfirm(filePath, startLine, endLine)
+        );
+        
+        // Snippet selector container
+        this.snippetSelectorEl = inputSection.createDiv({ cls: 'snippet-selector-container hidden' });
+
+        // Context tags area (above input, variable height)
+        this.contextTagsEl = inputBox.createDiv({ cls: 'context-tags-area' });
 
         // Toolbar (no top divider, buttons have no border)
         const toolbar = inputBox.createDiv({ cls: 'input-toolbar' });
@@ -319,18 +385,45 @@ export class EnhancedChatView extends ItemView {
         this.modelDropdownEl = toolbar.createDiv({ cls: 'combobox-dropdown model-dropdown hidden' });
         this.renderModelDropdown();
 
-        // Context tags
-        this.contextTagsEl = toolbar.createDiv({ cls: 'context-tags' });
-
-        // Send button (right arrow) - Rightmost in toolbar, close to frame
-        const sendBtn = toolbar.createEl('button', { cls: 'send-arrow-btn', attr: { title: 'Send message' } });
-        sendBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
-        sendBtn.onClickEvent(() => {
-            if (this.inputEl) {
+        // Send/Stop button - Rightmost in toolbar, close to frame
+        this.sendBtnEl = toolbar.createEl('button', { cls: 'send-arrow-btn', attr: { title: 'Send message' } });
+        this.updateSendButton();
+        this.sendBtnEl.onClickEvent(() => {
+            if (this.isLoading) {
+                this.stopGeneration();
+            } else if (this.inputEl) {
                 this.sendMessage(this.inputEl.value);
                 this.inputEl.value = '';
             }
         });
+    }
+    
+    /**
+     * Update send button appearance based on loading state
+     */
+    private updateSendButton(): void {
+        if (!this.sendBtnEl) return;
+        
+        if (this.isLoading) {
+            // Show stop button
+            this.sendBtnEl.className = 'stop-btn';
+            this.sendBtnEl.setAttribute('title', 'Stop generation');
+            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>';
+        } else {
+            // Show send button
+            this.sendBtnEl.className = 'send-arrow-btn';
+            this.sendBtnEl.setAttribute('title', 'Send message');
+            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
+        }
+    }
+    
+    /**
+     * Stop LLM generation
+     */
+    private stopGeneration(): void {
+        this.isLoading = false;
+        this.updateSendButton();
+        new Notice('Generation stopped');
     }
 
     // === Dropdown Methods ===
@@ -370,6 +463,24 @@ export class EnhancedChatView extends ItemView {
         this.contextDropdownEl.addEventListener('blur', () => {
             setTimeout(() => this.contextDropdownEl?.addClass('hidden'), 150);
         });
+
+        // Add selection option (for selected text in editor)
+        const selectionItem = this.contextDropdownEl.createDiv({ cls: 'dropdown-item' });
+        selectionItem.createSpan({ text: '✂️ Add Current Selection' });
+        selectionItem.onClickEvent(async () => {
+            const ctx = await addSelectionAsContext(this.app);
+            if (ctx) {
+                this.contexts.push(ctx);
+                this.renderContextTags();
+                new Notice(`Added selection: ${ctx.name}`);
+            } else {
+                new Notice('No text selected in editor');
+            }
+            this.contextDropdownEl?.addClass('hidden');
+        });
+
+        // Divider
+        this.contextDropdownEl.createDiv({ cls: 'dropdown-divider' });
 
         this.loadContextSources();
 
@@ -505,11 +616,48 @@ export class EnhancedChatView extends ItemView {
 
         this.contexts.forEach(ctx => {
             const tag = this.contextTagsEl!.createSpan({ cls: 'context-tag' });
-            const icon = ctx.type === 'file' ? '📄' : ctx.type === 'wiki' ? '📖' : '📝';
-            tag.createSpan({ text: `${icon} ${ctx.name}` });
+            const icon = ctx.type === 'file' ? '📄' : ctx.type === 'wiki' ? '📖' : ctx.type === 'snippet' ? '✂️' : '📝';
+            
+            // Show name with link if available
+            const nameSpan = tag.createSpan({ text: `${icon} ${ctx.name}` });
+            if (ctx.link) {
+                nameSpan.setAttribute('title', ctx.link);
+                nameSpan.addClass('has-link');
+                // Click to open file
+                nameSpan.onClickEvent(() => this.openContextFile(ctx));
+            }
+            
+            // Remove button only (no edit button)
             tag.createEl('button', { text: '✕', cls: 'tag-remove' })
                 .onClickEvent(() => this.removeContext(ctx.id));
         });
+    }
+    
+    /**
+     * Open context file in editor
+     */
+    private async openContextFile(ctx: ChatContext): Promise<void> {
+        if (!ctx.path) return;
+        
+        const file = this.app.vault.getAbstractFileByPath(ctx.path);
+        if (file instanceof TFile) {
+            const leaf = this.app.workspace.getLeaf(false);
+            await leaf.openFile(file);
+        }
+    }
+    
+    /**
+     * Edit context (modify snippet range or file content)
+     */
+    private async editContext(ctx: ChatContext): Promise<void> {
+        if (ctx.type === 'snippet' && ctx.path) {
+            // Show snippet selector to modify range
+            await this.showSnippetSelector(ctx.path);
+        } else if (ctx.type === 'file' && ctx.path) {
+            // Open file in editor
+            await this.openContextFile(ctx);
+            new Notice('File opened in editor. Use @ → Add Current Selection to update context.');
+        }
     }
 
     private removeContext(contextId: string) {
@@ -611,6 +759,7 @@ export class EnhancedChatView extends ItemView {
         if (!text.trim() || this.isLoading) return;
 
         this.isLoading = true;
+        this.updateSendButton();
         const messageText = text.trim();
         
         this.addMessage('user', messageText, this.contexts.length > 0 ? [...this.contexts] : undefined);
@@ -636,6 +785,8 @@ When you need to use tools, please call the corresponding tool functions.`;
             
             // If there's context, add to system prompt
             if (this.contexts.length > 0 && this.contextManager) {
+                // Sync contexts to context manager
+                this.contextManager.deserialize(this.contexts);
                 const contextContent = this.contextManager.assemblePrompt();
                 systemPrompt += `\n\n## Context Information\n${contextContent}`;
             }
@@ -691,7 +842,7 @@ When you need to use tools, please call the corresponding tool functions.`;
                         for (const toolCall of toolCalls) {
                             const toolName = toolCall.function.name;
                             const toolArgs = toolCall.function.arguments;
-                            this.appendToLastMessage(`\n\n🔧 Calling tool: ${toolName}(${JSON.stringify(toolArgs)})...`);
+                            this.appendToLastMessage(`\n\n🔧 **Calling tool:** \`${toolName}\`\n\`\`\`json\n${JSON.stringify(toolArgs, null, 2)}\n\`\`\`\n`);
                         }
                         
                         // Execute tool calls
@@ -711,17 +862,17 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 // Execute tool
                                 const result = await executeTool(toolName, toolArgs, toolContext);
                                 
-                                // Display tool result
+                                // Display tool result with markdown formatting
                                 if (result.success) {
-                                    this.appendToLastMessage(`\n✅ Tool executed successfully`);
+                                    this.appendToLastMessage(`\n✅ **Tool executed successfully**`);
                                     if (result.data) {
                                         const dataStr = JSON.stringify(result.data, null, 2);
                                         // Limit display length
-                                        const displayStr = dataStr.length > 500 ? dataStr.substring(0, 500) + '...' : dataStr;
-                                        this.appendToLastMessage(`\nResult: ${displayStr}`);
+                                        const displayStr = dataStr.length > 1000 ? dataStr.substring(0, 1000) + '\n... (truncated)' : dataStr;
+                                        this.appendToLastMessage(`\n\n**Result:**\n\`\`\`json\n${displayStr}\n\`\`\``);
                                     }
                                 } else {
-                                    this.appendToLastMessage(`\n❌ Tool execution failed: ${result.error}`);
+                                    this.appendToLastMessage(`\n❌ **Tool execution failed:** ${result.error}`);
                                 }
                                 
                                 // Add tool result to message list
@@ -732,7 +883,7 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 });
                             } catch (error) {
                                 const errorMsg = String(error);
-                                this.appendToLastMessage(`\n❌ Tool execution error: ${errorMsg}`);
+                                this.appendToLastMessage(`\n❌ **Tool execution error:** ${errorMsg}`);
                                 toolResults.push({
                                     role: 'tool',
                                     content: JSON.stringify({ success: false, error: errorMsg }),
@@ -797,6 +948,7 @@ When you need to use tools, please call the corresponding tool functions.`;
             this.addMessage('system', `❌ Error: ${error}`);
         } finally {
             this.isLoading = false;
+            this.updateSendButton();
         }
     }
 
@@ -820,11 +972,154 @@ When you need to use tools, please call the corresponding tool functions.`;
     }
 
     private renderContent(content: string): string {
-        return content
-            .replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, '<span class="wiki-link">[[$1]]</span>')
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-            .replace(/\n/g, '<br>');
+        // First, handle code blocks (```language\ncode\n```)
+        let result = content;
+        
+        // Process code blocks first (before other replacements)
+        result = result.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+            const escapedCode = this.escapeHtml(code.trim());
+            return `<pre class="code-block" data-lang="${lang || 'text'}"><code>${escapedCode}</code></pre>`;
+        });
+        
+        // Then handle inline code (`code`)
+        result = result.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+        
+        // Handle wiki links [[link]]
+        result = result.replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, '<span class="wiki-link">[[$1]]</span>');
+        
+        // Handle bold **text**
+        result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        
+        // Handle italic *text*
+        result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        
+        // Handle newlines (but not inside code blocks)
+        result = result.replace(/\n/g, '<br>');
+        
+        return result;
+    }
+    
+    private escapeHtml(text: string): string {
+        const escapeMap: Record<string, string> = {
+            '&': '\u0026amp;',
+            '<': '\u003C',
+            '>': '\u003E',
+            '"': '\u0022quot;',
+            "'": '\u0027039;'
+        };
+        let result = text;
+        for (const [char, entity] of Object.entries(escapeMap)) {
+            result = result.split(char).join(entity);
+        }
+        return result;
+    }
+    
+    // === File Selector Methods ===
+    
+    /**
+     * Show the file selector (triggered by @)
+     */
+    private showFileSelector(): void {
+        if (!this.fileSelectorEl || !this.fileSelector) return;
+        
+        this.fileSelectorEl.removeClass('hidden');
+        this.fileSelector.show('@');
+        this.fileSelectorVisible = true;
+    }
+    
+    /**
+     * Hide the file selector
+     */
+    private hideFileSelector(): void {
+        if (!this.fileSelectorEl || !this.fileSelector) return;
+        
+        this.fileSelector.hide();
+        this.fileSelectorEl.addClass('hidden');
+        this.fileSelectorVisible = false;
+    }
+    
+    /**
+     * Handle file selection from file selector
+     */
+    private async handleFileSelect(item: FileItem): Promise<void> {
+        if (item.type !== 'file') return;
+        
+        // Hide file selector
+        this.hideFileSelector();
+        
+        // Remove @ from input
+        if (this.inputEl) {
+            const value = this.inputEl.value;
+            const cursorPos = this.inputEl.selectionStart || 0;
+            // Find and remove the @ that triggered the selector
+            const beforeAt = value.substring(0, cursorPos - 1);
+            const afterAt = value.substring(cursorPos);
+            this.inputEl.value = beforeAt + afterAt;
+        }
+        
+        // Add file as context with link
+        const ctx = await addFileWithContext(this.app, item.path);
+        if (ctx) {
+            this.contexts.push(ctx);
+            this.renderContextTags();
+            new Notice(`Added context: ${item.name}`);
+            
+            // Ask if user wants to add entire file or select snippet
+            // For now, we add the entire file. User can use snippet selector for partial content.
+        }
+    }
+    
+    /**
+     * Handle snippet confirmation
+     */
+    private async handleSnippetConfirm(filePath: string, startLine: number, endLine: number): Promise<void> {
+        // Hide snippet selector
+        if (this.snippetSelectorEl) {
+            this.snippetSelectorEl.addClass('hidden');
+        }
+        if (this.snippetSelector) {
+            this.snippetSelector.hide();
+        }
+        
+        // Add snippet as context
+        const ctx = await addSnippetContext(this.app, filePath, startLine, endLine);
+        if (ctx) {
+            this.contexts.push(ctx);
+            this.renderContextTags();
+            new Notice(`Added snippet: ${ctx.name}`);
+        }
+    }
+    
+    /**
+     * Show snippet selector for a file
+     */
+    private async showSnippetSelector(filePath: string): Promise<void> {
+        if (!this.snippetSelectorEl) return;
+        
+        try {
+            const file = this.app.vault.getAbstractFileByPath(filePath);
+            if (file instanceof TFile) {
+                const content = await this.app.vault.read(file);
+                
+                this.snippetSelectorEl.removeClass('hidden');
+                this.snippetSelector = new SnippetSelector(
+                    this.app,
+                    this.snippetSelectorEl,
+                    filePath,
+                    content,
+                    (fp, start, end) => this.handleSnippetConfirm(fp, start, end)
+                );
+                this.snippetSelector.show();
+            }
+        } catch (error) {
+            console.error('Failed to show snippet selector:', error);
+        }
+    }
+    
+    /**
+     * Parse [[file]] references from message and return file paths
+     */
+    private extractFileReferences(text: string): FileReference[] {
+        return parseFileReferences(text);
     }
 }
