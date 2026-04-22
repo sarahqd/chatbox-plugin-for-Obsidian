@@ -481,9 +481,18 @@
     font-size: 14px;
 }
 
+/* Model selector wrapper */
+.model-selector-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    position: relative;
+}
+
 /* Model selector style */
 .model-selector {
-    margin-left: auto;
+    /* No margin-left here, it's on the wrapper */
 }
 
 .model-selector .model-label {
@@ -494,6 +503,21 @@
 .model-arrow {
     font-size: 10px;
     color: var(--text-muted);
+}
+
+/* Token display */
+.token-display {
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 2px 6px;
+    background: var(--background-secondary);
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.token-display.token-warning {
+    color: var(--text-error);
+    background: rgba(var(--color-red-rgb, 220,53,69), 0.1);
 }
 
 /* File upload hidden input */

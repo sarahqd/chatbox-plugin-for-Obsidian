@@ -15,7 +15,6 @@ title: ${fm.title}
 created: ${fm.created}
 updated: ${fm.updated}
 tags: [${fm.tags.join(', ')}]
-related: [${fm.related.map(r => `[[${r}]]`).join(', ')}]
 ---`;
 }
 

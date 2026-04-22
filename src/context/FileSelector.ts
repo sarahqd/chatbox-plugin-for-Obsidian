@@ -489,9 +489,11 @@ export class FileSelector {
                 cls: `file-selector-item ${index === this.selectedIndex ? 'selected' : ''} ${item.type}`
             });
             
-            // Icon
-            const icon = item.type === 'folder' ? '📁' : this.getFileIcon(item.extension || '');
-            itemEl.createSpan({ text: icon, cls: 'file-selector-icon' });
+            // Icon - only add for files, folders already have icon in name
+            if (item.type === 'file') {
+                const icon = this.getFileIcon(item.extension || '');
+                itemEl.createSpan({ text: icon, cls: 'file-selector-icon' });
+            }
             
             // Name
             itemEl.createSpan({ text: item.name, cls: 'file-selector-name' });

@@ -44,6 +44,7 @@ export class EnhancedChatView extends ItemView {
     private contextTagsEl: HTMLElement | null = null;
     private modelLabelEl: HTMLElement | null = null;
     private sendBtnEl: HTMLElement | null = null;
+    private tokenDisplayEl: HTMLElement | null = null;
     
     // Managers
     private contextManager: ContextManager | null = null;
@@ -132,9 +133,9 @@ export class EnhancedChatView extends ItemView {
         // Right: Button group (icon style)
         const btnGroup = header.createDiv({ cls: 'header-btn-group' });
 
-        // New chat button (trash icon for clearing)
+        // New chat button (plus icon for new chat)
         const newChatBtn = btnGroup.createEl('button', { cls: 'icon-btn', attr: { title: 'New Chat' } });
-        newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg>';
+        newChatBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
         newChatBtn.onClickEvent(() => this.newChat());
 
         // Chat history button (clock icon)
@@ -358,7 +359,7 @@ export class EnhancedChatView extends ItemView {
         // @ button
         const atBtn = toolbar.createEl('button', { cls: 'toolbar-btn at-btn', attr: { title: 'Add context' } });
         atBtn.setText('@');
-        atBtn.onClickEvent(() => this.toggleContextDropdown());
+        atBtn.onClickEvent(() => this.showFileSelector());
 
         // Context dropdown
         this.contextDropdownEl = toolbar.createDiv({ cls: 'combobox-dropdown context-dropdown hidden' });
@@ -374,15 +375,21 @@ export class EnhancedChatView extends ItemView {
         });
         fileInput.addEventListener('change', () => this.handleFileUpload(fileInput));
 
-        // Model selector
-        const modelSelector = toolbar.createDiv({ cls: 'toolbar-btn model-selector' });
+        // Model selector with token display
+        const modelSelectorWrapper = toolbar.createDiv({ cls: 'model-selector-wrapper' });
+        
+        const modelSelector = modelSelectorWrapper.createDiv({ cls: 'toolbar-btn model-selector' });
         this.modelLabelEl = modelSelector.createSpan({ cls: 'model-label' });
         this.modelLabelEl.setText(this.currentModel);
         modelSelector.createSpan({ text: ' ▼', cls: 'model-arrow' });
         modelSelector.onClickEvent(() => this.toggleModelDropdown());
 
+        // Token display (used/max in k units)
+        this.tokenDisplayEl = modelSelectorWrapper.createSpan({ cls: 'token-display' });
+        this.updateTokenDisplay();
+
         // Model dropdown
-        this.modelDropdownEl = toolbar.createDiv({ cls: 'combobox-dropdown model-dropdown hidden' });
+        this.modelDropdownEl = modelSelectorWrapper.createDiv({ cls: 'combobox-dropdown model-dropdown hidden' });
         this.renderModelDropdown();
 
         // Send/Stop button - Rightmost in toolbar, close to frame
@@ -424,6 +431,33 @@ export class EnhancedChatView extends ItemView {
         this.isLoading = false;
         this.updateSendButton();
         new Notice('Generation stopped');
+    }
+    
+    /**
+     * Update token display (used/max in k units)
+     */
+    private updateTokenDisplay(): void {
+        if (!this.tokenDisplayEl) return;
+        
+        // Calculate used tokens from contexts
+        const usedTokens = this.contexts.reduce((sum, ctx) => sum + (ctx.tokens || 0), 0);
+        
+        // Get max context length from current model or settings
+        const currentModelConfig = this.plugin.settings.models.find(m => m.id === this.plugin.settings.currentModelId);
+        const maxTokens = currentModelConfig?.contextLength || this.plugin.settings.maxContextTokens || 8192;
+        
+        // Convert to k units
+        const usedK = (usedTokens / 1000).toFixed(1);
+        const maxK = (maxTokens / 1000).toFixed(0);
+        
+        this.tokenDisplayEl.setText(`${usedK}/${maxK}k`);
+        
+        // Add warning class if over 80%
+        if (usedTokens > maxTokens * 0.8) {
+            this.tokenDisplayEl.addClass('token-warning');
+        } else {
+            this.tokenDisplayEl.removeClass('token-warning');
+        }
     }
 
     // === Dropdown Methods ===
@@ -610,9 +644,11 @@ export class EnhancedChatView extends ItemView {
 
         if (this.contexts.length === 0) {
             this.contextTagsEl.addClass('hidden');
+            this.updateTokenDisplay();
             return;
         }
         this.contextTagsEl.removeClass('hidden');
+        this.updateTokenDisplay();
 
         this.contexts.forEach(ctx => {
             const tag = this.contextTagsEl!.createSpan({ cls: 'context-tag' });
@@ -1115,7 +1151,7 @@ When you need to use tools, please call the corresponding tool functions.`;
             console.error('Failed to show snippet selector:', error);
         }
     }
-    
+
     /**
      * Parse [[file]] references from message and return file paths
      */
