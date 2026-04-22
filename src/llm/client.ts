@@ -145,7 +145,7 @@ export class LLMClient implements LLMProviderInterface {
             // Try to initialize the provider if it exists in settings
             const config = this.settings.providers.find(p => p.name === model.provider);
             if (config) {
-                this.initializeProviderFromConfig(config);
+                this.initializeProviderFromConfig(config, model);
                 provider = this.getProvider(model.provider);
             }
         }
@@ -157,36 +157,44 @@ export class LLMClient implements LLMProviderInterface {
         return provider;
     }
 
-    private initializeProviderFromConfig(config: ProviderConfig): void {
-        if (config.name === 'Ollama' && config.enabled) {
+    private initializeProviderFromConfig(config: ProviderConfig, model?: ModelConfig): void {
+        // Get API key and base URL from model config (if provided) or fall back to provider config
+        const apiKey = model?.apiKey || config.apiKey;
+        const baseUrl = model?.baseUrl || config.baseUrl;
+        
+        // Check if provider is enabled OR if model provides its own complete configuration
+        // This allows models to work even if the provider is not globally enabled
+        const canInitialize = config.enabled || (model?.apiKey && model?.baseUrl);
+        
+        if (config.name === 'Ollama' && canInitialize) {
             const client = new OllamaClient(
-                config.baseUrl || this.settings.ollamaUrl,
-                this.settings.model
+                baseUrl || this.settings.ollamaUrl,
+                model?.modelId || this.settings.model
             );
             this.providers.set('Ollama', this.wrapOllamaClient(client));
-        } else if (config.name === 'OpenAI' && config.enabled && config.apiKey) {
+        } else if (config.name === 'OpenAI' && canInitialize && apiKey) {
             this.providers.set('OpenAI', new OpenAIProvider({
-                apiKey: config.apiKey,
-                baseUrl: config.baseUrl,
-                model: 'gpt-4o',
+                apiKey: apiKey,
+                baseUrl: baseUrl,
+                model: model?.modelId || 'gpt-4o',
             }));
-        } else if (config.name === 'Anthropic' && config.enabled && config.apiKey) {
+        } else if (config.name === 'Anthropic' && canInitialize && apiKey) {
             this.providers.set('Anthropic', new AnthropicProvider({
-                apiKey: config.apiKey,
-                baseUrl: config.baseUrl,
-                model: 'claude-3-5-sonnet-20241022',
+                apiKey: apiKey,
+                baseUrl: baseUrl,
+                model: model?.modelId || 'claude-3-5-sonnet-20241022',
             }));
-        } else if (config.name === 'DeepSeek' && config.enabled && config.apiKey) {
+        } else if (config.name === 'DeepSeek' && canInitialize && apiKey) {
             this.providers.set('DeepSeek', new OpenAIProvider({
-                apiKey: config.apiKey,
-                baseUrl: config.baseUrl || 'https://api.deepseek.com/v1',
-                model: 'deepseek-chat',
+                apiKey: apiKey,
+                baseUrl: baseUrl || 'https://api.deepseek.com/v1',
+                model: model?.modelId || 'deepseek-chat',
             }));
-        } else if (config.name === 'OpenAI Compatible' && config.enabled && config.apiKey && config.baseUrl) {
+        } else if (config.name === 'OpenAI Compatible' && canInitialize && apiKey && baseUrl) {
             this.providers.set('OpenAI Compatible', new OpenAIProvider({
-                apiKey: config.apiKey,
-                baseUrl: config.baseUrl,
-                model: 'default',
+                apiKey: apiKey,
+                baseUrl: baseUrl,
+                model: model?.modelId || 'default',
             }));
         }
     }
