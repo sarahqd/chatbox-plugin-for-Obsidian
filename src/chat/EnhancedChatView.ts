@@ -253,6 +253,9 @@ export class EnhancedChatView extends ItemView {
         });
 
         this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+        
+        // Update token display after rendering messages
+        this.updateTokenDisplay();
     }
     
     /**
@@ -274,6 +277,8 @@ export class EnhancedChatView extends ItemView {
                 // Regular text content
                 const textEl = container.createDiv();
                 textEl.innerHTML = this.renderContent(part.content);
+                // Attach click handlers for wiki links
+                this.attachWikiLinkHandlers(textEl);
             } else if (part.type === 'tool-call') {
                 // Collapsible tool call section
                 this.renderCollapsibleToolCall(container, part);
@@ -282,6 +287,59 @@ export class EnhancedChatView extends ItemView {
                 this.renderCollapsibleToolResult(container, part);
             }
         });
+    }
+    
+    /**
+     * Attach click handlers to wiki link elements
+     */
+    private attachWikiLinkHandlers(container: HTMLElement): void {
+        const wikiLinks = container.querySelectorAll('.wiki-link');
+        wikiLinks.forEach((el) => {
+            const linkEl = el as HTMLElement;
+            const wikiLink = linkEl.getAttribute('data-wiki-link');
+            if (wikiLink) {
+                linkEl.addClass('wiki-link-clickable');
+                linkEl.onClickEvent((e) => {
+                    e.stopPropagation();
+                    this.openWikiLink(wikiLink);
+                });
+            }
+        });
+    }
+    
+    /**
+     * Open a wiki link (file in vault)
+     */
+    private async openWikiLink(linkText: string): Promise<void> {
+        // Try to find the file in the vault
+        // First try exact match with .md extension
+        let filePath = linkText.endsWith('.md') ? linkText : `${linkText}.md`;
+        let file = this.app.vault.getAbstractFileByPath(filePath);
+        
+        // If not found, try without extension (for files that already have it)
+        if (!file) {
+            file = this.app.vault.getAbstractFileByPath(linkText);
+        }
+        
+        // If still not found, search for files with similar names
+        if (!file) {
+            const files = this.app.vault.getMarkdownFiles();
+            const matchingFile = files.find(f => {
+                const basename = f.basename || f.name.replace(/\.md$/, '');
+                return basename === linkText || f.path.includes(linkText);
+            });
+            if (matchingFile) {
+                file = matchingFile;
+            }
+        }
+        
+        if (file instanceof TFile) {
+            const leaf = this.app.workspace.getLeaf(false);
+            await leaf.openFile(file);
+            new Notice(`Opened: ${file.path}`);
+        } else {
+            new Notice(`File not found: ${linkText}`);
+        }
     }
     
     /**
@@ -669,16 +727,27 @@ export class EnhancedChatView extends ItemView {
         if (!this.tokenDisplayEl) return;
         
         // Calculate used tokens from contexts
-        const usedTokens = this.contexts.reduce((sum, ctx) => sum + (ctx.tokens || 0), 0);
+        const contextTokens = this.contexts.reduce((sum, ctx) => sum + (ctx.tokens || 0), 0);
+        
+        // Calculate used tokens from conversation messages
+        const messageTokens = this.messages.reduce((sum, msg) => {
+            // Estimate tokens: ~4 chars per token for English, ~1.5 for Chinese
+            const content = msg.content || '';
+            const chineseChars = (content.match(/[\u4e00-\u9fa5]/g) || []).length;
+            const otherChars = content.length - chineseChars;
+            return sum + Math.ceil(chineseChars / 1.5 + otherChars / 4);
+        }, 0);
+        
+        const usedTokens = contextTokens + messageTokens;
         
         // Get max context length from current model or settings
         const currentModelConfig = this.plugin.settings.models.find(m => m.id === this.plugin.settings.currentModelId);
         const maxTokens = currentModelConfig?.contextLength || this.plugin.settings.maxContextTokens || 8192;
         
-        // Convert to k units
+        // Convert to k units (1k = 1000 tokens)
         const usedK = (usedTokens / 1000).toFixed(1);
-        const maxK = (maxTokens / 1000).toFixed(0);
-        
+        const maxK = Math.round(maxTokens / 1000);
+
         this.tokenDisplayEl.setText(`${usedK}/${maxK}k`);
         
         // Add warning class if over 80%
@@ -816,6 +885,8 @@ export class EnhancedChatView extends ItemView {
             if (currentModelConfig) {
                 this.currentModel = currentModelConfig.name;
             }
+            // Update token display after loading models
+            this.updateTokenDisplay();
             this.renderModelDropdown();
         } catch (e) {
             console.error('Failed to load models:', e);
@@ -843,6 +914,9 @@ export class EnhancedChatView extends ItemView {
         if (this.modelLabelEl) {
             this.modelLabelEl.setText(model);
         }
+        
+        // Update token display when model changes
+        this.updateTokenDisplay();
         
         this.renderModelDropdown();
         new Notice(`Switched to model: ${model}`);
@@ -1268,17 +1342,47 @@ When you need to use tools, please call the corresponding tool functions.`;
         // Then handle inline code (`code`)
         result = result.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
         
-        // Handle wiki links [[link]]
-        result = result.replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, '<span class="wiki-link">[[$1]]</span>');
+        // Handle wiki links [[link]] - make them clickable with data attribute
+        result = result.replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, (_, linkText) => {
+            const escapedLink = this.escapeHtml(linkText);
+            return `<span class="wiki-link" data-wiki-link="${escapedLink}">[[${escapedLink}]]</span>`;
+        });
+        
+        // Handle headings (must be at start of line or after newline)
+        // ## Heading -> <h2>Heading</h2>
+        result = result.replace(/^### (.+)$/gm, '<h3 class="md-heading md-h3">$1</h3>');
+        result = result.replace(/^## (.+)$/gm, '<h2 class="md-heading md-h2">$1</h2>');
+        result = result.replace(/^# (.+)$/gm, '<h1 class="md-heading md-h1">$1</h1>');
+        
+        // Handle unordered lists (- item or * item)
+        result = result.replace(/^- (.+)$/gm, '<li class="md-list-item">$1</li>');
+        result = result.replace(/^\* (.+)$/gm, '<li class="md-list-item">$1</li>');
+        
+        // Handle ordered lists (1. item)
+        result = result.replace(/^\d+\. (.+)$/gm, '<li class="md-list-item md-ordered">$1</li>');
+        
+        // Wrap consecutive list items in <ul>
+        result = result.replace(/(<li class="md-list-item"[^>]*>.*?<\/li>\n?)+/g, (match) => {
+            return `<ul class="md-list">${match}</ul>`;
+        });
         
         // Handle bold **text**
         result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
         
-        // Handle italic *text*
-        result = result.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        // Handle italic *text* (but not if it's part of a list marker already processed)
+        result = result.replace(/(?<!<li[^>]*>)\*([^*]+)\*/g, '<em>$1</em>');
         
-        // Handle newlines (but not inside code blocks)
-        result = result.replace(/\n/g, '<br>');
+        // Handle links [text](url)
+        result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="md-link" target="_blank">$1</a>');
+        
+        // Handle blockquotes (> text)
+        result = result.replace(/^> (.+)$/gm, '<blockquote class="md-quote">$1</blockquote>');
+        
+        // Handle horizontal rules (---)
+        result = result.replace(/^---$/gm, '<hr class="md-hr">');
+        
+        // Handle newlines (but not inside code blocks or after block elements)
+        result = result.replace(/\n(?!<\/(?:pre|h[1-6]|ul|ol|li|blockquote|hr)>)/g, '<br>');
         
         return result;
     }

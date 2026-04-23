@@ -179,6 +179,11 @@
     padding: 10px 14px;
     border-radius: 12px;
     word-wrap: break-word;
+    /* Enable text selection */
+    user-select: text;
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
 }
 
 .message-bubble.user {
@@ -204,6 +209,93 @@
 .message-content {
     line-height: 1.6;
     font-size: 14px;
+    /* Enable text selection */
+    user-select: text;
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+    cursor: text;
+}
+
+/* Code blocks should also be selectable */
+.code-block,
+.code-block code,
+.inline-code {
+    user-select: text;
+    -webkit-user-select: text;
+    -moz-user-select: text;
+    -ms-user-select: text;
+}
+
+/* ============================================
+   Markdown Element Styles
+   ============================================ */
+
+/* Markdown headings */
+.md-heading {
+    margin: 0;
+    padding: 0;
+    line-height: 1.3;
+    font-weight: 600;
+    color: var(--text-normal);
+}
+
+.md-h1 {
+    font-size: 1.5em;
+    margin-bottom: 0.3em;
+}
+
+.md-h2 {
+    font-size: 1.3em;
+    margin-bottom: 0.25em;
+}
+
+.md-h3 {
+    font-size: 1.15em;
+    margin-bottom: 0.2em;
+}
+
+/* Markdown lists */
+.md-list {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+    list-style-type: disc;
+}
+
+.md-list-item {
+    margin: 0.25em 0;
+    line-height: 1.5;
+}
+
+.md-list-item.md-ordered {
+    list-style-type: decimal;
+}
+
+/* Markdown links */
+.md-link {
+    color: var(--text-accent);
+    text-decoration: none;
+}
+
+.md-link:hover {
+    text-decoration: underline;
+}
+
+/* Markdown blockquotes */
+.md-quote {
+    margin: 0.5em 0;
+    padding: 0.5em 1em;
+    border-left: 3px solid var(--background-modifier-border);
+    background: var(--background-secondary);
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* Markdown horizontal rule */
+.md-hr {
+    border: none;
+    border-top: 1px solid var(--background-modifier-border);
+    margin: 0.75em 0;
 }
 
 /* Meta row: time + action buttons, below bubble */
@@ -281,10 +373,25 @@
 }
 
 .wiki-link {
-    background: var(--text-highlight-bg);
+    background: var(--background-modifier-hover);
     padding: 1px 4px;
     border-radius: 3px;
     color: var(--text-accent);
+}
+
+/* Clickable wiki link style */
+.wiki-link-clickable {
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.wiki-link-clickable:hover {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+.wiki-link-clickable:active {
+    background: var(--interactive-accent-hover);
 }
 
 /* History list */

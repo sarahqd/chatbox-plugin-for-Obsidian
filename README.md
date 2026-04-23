@@ -56,7 +56,7 @@ your-vault/
 
 ### From Release
 
-1. Download the latest release from [GitHub Releases](https://github.com/sarahqd/chatbox-plugin-for-Obsidian/releases)
+1. Download the latest release from [GitHub Release](https://github.com/sarahqd/chatbox-plugin-for-Obsidian/release)
 2. Extract the files to `.obsidian/plugins/WikiChat/` in your Obsidian vault
 3. Open Obsidian Settings → Reload plugins
 4. Enable **WikiChat** plugin

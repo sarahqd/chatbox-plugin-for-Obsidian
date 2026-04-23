@@ -316,7 +316,7 @@ class LLMWikiSettingTab extends PluginSettingTab {
         // Add a display span for the value in 'k' format
         const valueDisplay = contextLengthSetting.controlEl.createSpan({ cls: 'context-length-display' });
         const updateDisplay = (value: number) => {
-            const kValue = Math.round(value / 1024);
+            const kValue = Math.round(value / 1024.0);
             valueDisplay.textContent = `${kValue}k`;
         };
         
@@ -678,7 +678,7 @@ class ModelEditModal extends Modal {
         // Add a display span for the value in 'k' format
         const valueDisplay = contextLengthSetting.controlEl.createSpan({ cls: 'context-length-display' });
         const updateDisplay = (value: number) => {
-            const kValue = Math.round(value / 1024);
+            const kValue = Math.round(value / 1024.0);
             valueDisplay.textContent = `${kValue}k`;
         };
         

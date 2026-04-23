@@ -27,8 +27,9 @@ function generateFrontmatter(fm: WikiPageFrontmatter): string {
         : '  []';
     
     // Format related as YAML array with wikilinks
+    // Quote wikilinks to preserve [[link]] format in YAML
     const relatedYaml = fm.related.length > 0
-        ? fm.related.map(r => `  - ${r}`).join('\n')
+        ? fm.related.map(r => `  - "${r}"`).join('\n')
         : '  []';
     
     return `---
@@ -77,10 +78,19 @@ function parseFrontmatter(content: string): { frontmatter: WikiPageFrontmatter |
     if (relatedInlineMatch) {
         related = relatedInlineMatch[1].split(',').map(r => r.trim()).filter(Boolean);
     } else {
-        // Match YAML array format: related:\n  - [[link1]]\n  - [[link2]]
+        // Match YAML array format: related:\n  - "[[link1]]"\n  - "[[link2]]"
+        // or: related:\n  - [[link1]]\n  - [[link2]] (legacy format)
         const relatedArrayMatch = fmText.match(/related:\s*\n((?:\s+- .+\n?)+)/);
         if (relatedArrayMatch) {
-            related = relatedArrayMatch[1].match(/- (.+)/g)?.map(r => r.replace('- ', '').trim()) || [];
+            related = relatedArrayMatch[1].match(/- (.+)/g)?.map(r => {
+                let value = r.replace('- ', '').trim();
+                // Remove surrounding quotes if present (both single and double)
+                if ((value.startsWith('"') && value.endsWith('"')) || 
+                    (value.startsWith("'") && value.endsWith("'"))) {
+                    value = value.slice(1, -1);
+                }
+                return value;
+            }).filter(Boolean) || [];
         }
     }
 
