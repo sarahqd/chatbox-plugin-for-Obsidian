@@ -50,6 +50,7 @@ your-vault/
 ├── Sources/       # Original documents and imported content
 ├── templates/     # Wiki page templates
 └── Wiki/          # Structured knowledge base pages
+    └── index.md   # Auto-generated index of all Wiki pages
 ```
 
 ## Installation
@@ -202,9 +203,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Inspired by [Andrej Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 - Built with [Obsidian API](https://docs.obsidian.md/Reference/Manifest)
 - Powered by local LLMs via [Ollama](https://ollama.com/)
-
----
-
-<p align="center">
-  Made with ❤️ by <a href="https://github.com/sarahqd">Sarah Li</a> assisted by AI models
-</p>
