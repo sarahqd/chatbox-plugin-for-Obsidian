@@ -655,6 +655,7 @@ export class EnhancedChatView extends ItemView {
             attr: { type: 'file', accept: '.md,.txt,.json', multiple: true },
             cls: 'file-input-hidden'
         });
+        uploadBtn.onClickEvent(() => fileInput.click());
         fileInput.addEventListener('change', () => this.handleFileUpload(fileInput));
 
         // Model selector with token display
