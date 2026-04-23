@@ -171,7 +171,7 @@ export class OpenAIProvider implements LLMProviderInterface {
     }
 
     async chatStream(options: LLMStreamOptions): Promise<LLMResponse> {
-        const { messages, tools, systemPrompt, temperature, maxTokens, onChunk } = options;
+        const { messages, tools, systemPrompt, temperature, maxTokens, onChunk, signal } = options;
 
         const body: Record<string, unknown> = {
             model: this.model,
@@ -198,6 +198,7 @@ export class OpenAIProvider implements LLMProviderInterface {
                 'Authorization': `Bearer ${this.apiKey}`,
             },
             body: JSON.stringify(body),
+            signal,  // Pass abort signal
         });
 
         if (!response.ok) {
@@ -262,6 +263,12 @@ export class OpenAIProvider implements LLMProviderInterface {
                     }
                 }
             }
+        } catch (error) {
+            // Check if this was an abort error
+            if (signal?.aborted) {
+                throw new Error('Request aborted');
+            }
+            throw error;
         } finally {
             reader.releaseLock();
         }

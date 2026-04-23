@@ -416,7 +416,7 @@ export const updateIndexTool: ToolDefinition = {
                 return { success: false, error: 'Wiki folder not found' };
             }
 
-            const pages: { title: string; path: string; tags: string[] }[] = [];
+            const pages: { title: string; path: string; tags: string[]; created: string; updated: string }[] = [];
             const files = vault.getMarkdownFiles();
 
             for (const file of files) {
@@ -428,24 +428,69 @@ export const updateIndexTool: ToolDefinition = {
                     title: frontmatter?.title || file.basename,
                     path: file.path,
                     tags: frontmatter?.tags || [],
+                    created: frontmatter?.created || '',
+                    updated: frontmatter?.updated || '',
                 });
             }
 
-            // Group by first letter or tag
+            // Sort pages by title
+            pages.sort((a, b) => a.title.localeCompare(b.title));
+
+            // Group by year (based on updated or created date)
             const grouped: Record<string, typeof pages> = {};
+            const noDate: typeof pages = [];
+            
             for (const page of pages) {
-                const key = page.title[0].toUpperCase();
-                if (!grouped[key]) grouped[key] = [];
-                grouped[key].push(page);
+                const dateStr = page.updated || page.created;
+                if (dateStr) {
+                    // Extract year from date string (format: YYYY-MM-DD)
+                    const yearMatch = dateStr.match(/^(\d{4})/);
+                    if (yearMatch) {
+                        const year = yearMatch[1];
+                        if (!grouped[year]) grouped[year] = [];
+                        grouped[year].push(page);
+                    } else {
+                        noDate.push(page);
+                    }
+                } else {
+                    noDate.push(page);
+                }
             }
 
-            // Generate index content
-            let indexContent = `# Wiki Index\n\nLast Updated: ${new Date().toLocaleString('en-US')}\n\n## Total Pages\n\n${pages.length} pages\n\n## Index\n\n`;
+            // Generate index content (English)
+            const now = new Date();
+            const lastUpdated = now.toISOString().split('T')[0] + ' ' + now.toTimeString().split(' ')[0];
+            let indexContent = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n---\n\n## Index\n\n`;
 
-            for (const key of Object.keys(grouped).sort()) {
-                indexContent += `### ${key}\n\n`;
-                for (const page of grouped[key]) {
-                    const tagStr = page.tags.length > 0 ? ` (${page.tags.join(', ')})` : '';
+            // Sort years in descending order (newest first)
+            const years = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
+            
+            for (const year of years) {
+                indexContent += `### ${year}\n\n`;
+                // Sort pages within each year by date (newest first), then by title
+                const yearPages = grouped[year].sort((a, b) => {
+                    const dateA = a.updated || a.created || '';
+                    const dateB = b.updated || b.created || '';
+                    // Sort by date descending first
+                    if (dateA !== dateB) return dateB.localeCompare(dateA);
+                    // Then by title ascending
+                    return a.title.localeCompare(b.title);
+                });
+                
+                for (const page of yearPages) {
+                    const dateStr = page.updated || page.created;
+                    const dateDisplay = dateStr ? ` _(${dateStr})_` : '';
+                    const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
+                    indexContent += `- [[${page.title}]]${dateDisplay}${tagStr}\n`;
+                }
+                indexContent += '\n';
+            }
+            
+            // Add pages without dates at the end
+            if (noDate.length > 0) {
+                indexContent += `### Undated\n\n`;
+                for (const page of noDate) {
+                    const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
                     indexContent += `- [[${page.title}]]${tagStr}\n`;
                 }
                 indexContent += '\n';

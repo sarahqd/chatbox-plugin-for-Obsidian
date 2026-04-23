@@ -67,7 +67,8 @@ export class OllamaClient {
         messages: OllamaMessage[],
         onChunk: (text: string) => void,
         tools?: OllamaTool[],
-        systemPrompt?: string
+        systemPrompt?: string,
+        signal?: AbortSignal
     ): Promise<OllamaMessage> {
         const allMessages = systemPrompt
             ? [{ role: 'system' as const, content: systemPrompt }, ...messages]
@@ -106,6 +107,7 @@ export class OllamaClient {
                 tools: tools,
                 stream: true,
             }),
+            signal,  // Pass abort signal
         });
 
         if (!response.ok) {
@@ -144,6 +146,12 @@ export class OllamaClient {
                     }
                 }
             }
+        } catch (error) {
+            // Check if this was an abort error
+            if (signal?.aborted) {
+                throw new Error('Request aborted');
+            }
+            throw error;
         } finally {
             reader.releaseLock();
         }

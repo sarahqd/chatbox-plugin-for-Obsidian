@@ -72,6 +72,9 @@ export class EnhancedChatView extends ItemView {
     private contextSources: { type: string; name: string; path: string }[] = [];
     private displayMode: DisplayMode = 'chat';
     
+    // Abort controller for stream cancellation
+    private abortController: AbortController | null = null;
+
     // File selector
     private fileSelectorEl: HTMLElement | null = null;
     private fileSelector: FileSelector | null = null;
@@ -586,10 +589,10 @@ export class EnhancedChatView extends ItemView {
         this.contextDropdownEl = toolbar.createDiv({ cls: 'combobox-dropdown context-dropdown hidden' });
         this.renderContextDropdown();
 
-        // + button (file upload)
+        // + button (file upload) - using plus.svg icon
         const uploadWrapper = toolbar.createDiv({ cls: 'upload-wrapper' });
-        const uploadBtn = uploadWrapper.createEl('button', { cls: 'toolbar-btn', attr: { title: 'Upload file' } });
-        uploadBtn.setText('+');
+        const uploadBtn = uploadWrapper.createEl('button', { cls: 'icon-btn', attr: { title: 'Upload file' } });
+        uploadBtn.innerHTML = '<svg viewBox="0 0 1024 1024" width="16" height="16"><path d="M474 152m8 0l60 0q8 0 8 8l0 704q0 8-8 8l-60 0q-8 0-8-8l0-704q0-8 8-8Z" fill="currentColor"></path><path d="M168 474m8 0l672 0q8 0 8 8l0 60q0 8-8 8l-672 0q-8 0-8-8l0-60q0-8 8-8Z" fill="currentColor"></path></svg>';
         const fileInput = uploadWrapper.createEl('input', {
             attr: { type: 'file', accept: '.md,.txt,.json', multiple: true },
             cls: 'file-input-hidden'
@@ -628,20 +631,21 @@ export class EnhancedChatView extends ItemView {
     
     /**
      * Update send button appearance based on loading state
+     * Uses SVG icons from icons/send.svg and icons/stop.svg
      */
     private updateSendButton(): void {
         if (!this.sendBtnEl) return;
         
         if (this.isLoading) {
-            // Show stop button
-            this.sendBtnEl.className = 'stop-btn';
+            // Show stop button - using stop.svg icon
+            this.sendBtnEl.className = 'send-btn';
             this.sendBtnEl.setAttribute('title', 'Stop generation');
-            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>';
+            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 1024 1024" width="16" height="16"><path d="M512 42.666667a469.333333 469.333333 0 1 0 469.333333 469.333333A469.333333 469.333333 0 0 0 512 42.666667z m0 864a394.666667 394.666667 0 1 1 394.666667-394.666667 395.146667 395.146667 0 0 1-394.666667 394.666667z" fill="currentColor"></path><path d="M365.333333 365.333333m5.333334 0l282.666666 0q5.333333 0 5.333334 5.333334l0 282.666666q0 5.333333-5.333334 5.333334l-282.666666 0q-5.333333 0-5.333334-5.333334l0-282.666666q0-5.333333 5.333334-5.333334Z" fill="currentColor"></path></svg>';
         } else {
-            // Show send button
-            this.sendBtnEl.className = 'send-arrow-btn';
+            // Show send button - using send.svg icon
+            this.sendBtnEl.className = 'send-btn';
             this.sendBtnEl.setAttribute('title', 'Send message');
-            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
+            this.sendBtnEl.innerHTML = '<svg viewBox="0 0 1024 1024" width="16" height="16"><path d="M469.333333 597.333333c-12.8 0-21.333333-4.266667-29.866666-12.8-17.066667-17.066667-17.066667-42.666667 0-59.733333l469.333333-469.333333c17.066667-17.066667 42.666667-17.066667 59.733333 0s17.066667 42.666667 0 59.733333l-469.333333 469.333333c-8.533333 8.533333-17.066667 12.8-29.866667 12.8z" fill="currentColor"></path><path d="M640 981.333333c-17.066667 0-34.133333-8.533333-38.4-25.6l-162.133333-366.933333-371.2-166.4C51.2 413.866667 42.666667 401.066667 42.666667 384s12.8-34.133333 29.866666-38.4l853.333334-298.666667c17.066667-4.266667 34.133333 0 42.666666 8.533334 12.8 12.8 17.066667 29.866667 8.533334 42.666666l-298.666667 853.333334c-4.266667 17.066667-17.066667 29.866667-38.4 29.866666zM200.533333 388.266667l285.866667 128c8.533333 4.266667 17.066667 12.8 21.333333 21.333333l128 285.866667 234.666667-669.866667L200.533333 388.266667z" fill="currentColor"></path></svg>';
         }
     }
     
@@ -649,6 +653,10 @@ export class EnhancedChatView extends ItemView {
      * Stop LLM generation
      */
     private stopGeneration(): void {
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
         this.isLoading = false;
         this.updateSendButton();
         new Notice('Generation stopped');
@@ -1019,6 +1027,10 @@ export class EnhancedChatView extends ItemView {
         this.updateSendButton();
         const messageText = text.trim();
         
+        // Create abort controller for this request
+        this.abortController = new AbortController();
+        const signal = this.abortController.signal;
+        
         this.addMessage('user', messageText, this.contexts.length > 0 ? [...this.contexts] : undefined);
 
         try {
@@ -1083,7 +1095,8 @@ When you need to use tools, please call the corresponding tool functions.`;
                             this.appendToLastMessage(chunk);
                         },
                         tools: useTools ? tools : undefined, 
-                        systemPrompt
+                        systemPrompt,
+                        signal  // Pass abort signal for cancellation
                     });
 
                     // Update last message with full content
@@ -1182,7 +1195,8 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 this.appendToLastMessage(chunk);
                             },
                             tools: undefined, // Without tools
-                            systemPrompt
+                            systemPrompt,
+                            signal  // Pass abort signal for cancellation
                         });
                         
                         if (this.messages.length > 0) {
@@ -1202,8 +1216,21 @@ When you need to use tools, please call the corresponding tool functions.`;
 
         } catch (error) {
             console.error('Ollama chat error:', error);
-            this.addMessage('system', `❌ Error: ${error}`);
+            
+            // Check if this was an abort (user cancelled)
+            if (signal.aborted) {
+                // Don't show error for user-initiated cancellation
+                // Just ensure the last message has some content if it was empty
+                if (this.messages.length > 0 && !this.messages[this.messages.length - 1].content.trim()) {
+                    this.messages[this.messages.length - 1].content = '*Generation stopped*';
+                    this.renderMessages();
+                }
+            } else {
+                this.addMessage('system', `❌ Error: ${error}`);
+            }
         } finally {
+            // Clean up abort controller
+            this.abortController = null;
             this.isLoading = false;
             this.updateSendButton();
         }

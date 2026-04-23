@@ -97,7 +97,8 @@ export class LLMClient implements LLMProviderInterface {
                     options.messages,
                     options.onChunk,
                     options.tools,
-                    options.systemPrompt
+                    options.systemPrompt,
+                    options.signal  // Pass abort signal
                 );
                 return { message };
             },

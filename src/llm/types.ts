@@ -20,6 +20,7 @@ export interface LLMChatOptions {
 
 export interface LLMStreamOptions extends LLMChatOptions {
     onChunk: (text: string) => void;
+    signal?: AbortSignal;  // For stream cancellation
 }
 
 export interface LLMResponse {

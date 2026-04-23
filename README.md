@@ -77,7 +77,9 @@ npm install
 npm run build 
 
 # Copy main files to WikiChat folder
-cp main.js manifest.json styles.css WikiChat/
+cp main.js WikiChat/
+cp manifest.json WikiChat/
+cp styles.css WikiChat/
 
 # Copy to your Obsidian vault
 cp -r WikiChat /path/to/your/vault/.obsidian/plugins/

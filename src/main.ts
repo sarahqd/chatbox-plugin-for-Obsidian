@@ -29,7 +29,7 @@ export default class LLMWikiPlugin extends Plugin {
         this.registerView(VIEW_TYPE_CHAT, (leaf) => new EnhancedChatView(leaf, this));
 
         // Add ribbon icon
-        this.addRibbonIcon('bot', 'WikiChat Chat', (evt: MouseEvent) => {
+        this.addRibbonIcon('bot', 'WikiChat', (evt: MouseEvent) => {
             this.activateView();
         });
 

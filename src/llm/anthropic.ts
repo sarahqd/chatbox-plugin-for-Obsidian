@@ -205,7 +205,7 @@ export class AnthropicProvider implements LLMProviderInterface {
     }
 
     async chatStream(options: LLMStreamOptions): Promise<LLMResponse> {
-        const { messages, tools, systemPrompt, temperature, maxTokens, onChunk } = options;
+        const { messages, tools, systemPrompt, temperature, maxTokens, onChunk, signal } = options;
 
         const formatted = this.formatMessages(messages);
 
@@ -236,6 +236,7 @@ export class AnthropicProvider implements LLMProviderInterface {
                 'anthropic-version': '2023-06-01',
             },
             body: JSON.stringify(body),
+            signal,  // Pass abort signal
         });
 
         if (!response.ok) {
@@ -312,6 +313,12 @@ export class AnthropicProvider implements LLMProviderInterface {
                     }
                 }
             }
+        } catch (error) {
+            // Check if this was an abort error
+            if (signal?.aborted) {
+                throw new Error('Request aborted');
+            }
+            throw error;
         } finally {
             reader.releaseLock();
         }
