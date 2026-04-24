@@ -1201,10 +1201,18 @@ When you need to use tools, please call the corresponding tool functions.`;
             }
 
             // Build message list
-            const messages: OllamaMessage[] = this.messages
+            const recentMessages = this.messages
                 .filter(m => m.role !== 'system')
-                .slice(-10)
-                .map(m => ({ role: m.role, content: m.content }));
+                .slice(-10);
+
+            const messages: OllamaMessage[] = [];
+            for (const msg of recentMessages) {
+                // Keep UI text unchanged, but send normalized wiki link paths for user messages.
+                const contentForModel = msg.role === 'user'
+                    ? await this.normalizeMessageWikiLinks(msg.content)
+                    : msg.content;
+                messages.push({ role: msg.role, content: contentForModel });
+            }
 
             // Add an empty assistant message for streaming updates
             this.addMessage('assistant', '');
@@ -1575,5 +1583,89 @@ When you need to use tools, please call the corresponding tool functions.`;
      */
     private extractFileReferences(text: string): FileReference[] {
         return parseFileReferences(text);
+    }
+
+    /**
+     * Normalize wiki links in user message to full file paths when possible.
+     * Example: [[Note]] -> [[folder/Note.md|Note]] (if resolvable)
+     */
+    private async normalizeMessageWikiLinks(text: string): Promise<string> {
+        const references = this.extractFileReferences(text);
+        if (references.length === 0) {
+            return text;
+        }
+
+        return text.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (fullMatch, rawPath: string, rawDisplay?: string) => {
+            const originalTarget = rawPath.trim();
+            const resolvedTarget = this.resolveWikiLinkToPath(originalTarget);
+            if (!resolvedTarget) {
+                return fullMatch;
+            }
+
+            const displayName = rawDisplay?.trim() || this.getWikiLinkDisplayName(originalTarget);
+            return createInternalLink(resolvedTarget, displayName);
+        });
+    }
+
+    /**
+     * Resolve wiki link target to an actual vault path, preserving heading/block suffix.
+     */
+    private resolveWikiLinkToPath(target: string): string | null {
+        const [rawBasePath, ...suffixParts] = target.split('#');
+        const basePath = rawBasePath.trim();
+        const suffix = suffixParts.length > 0 ? `#${suffixParts.join('#')}` : '';
+
+        if (!basePath) {
+            return null;
+        }
+
+        const resolvedBasePath = this.findWikiFilePath(basePath);
+        if (!resolvedBasePath) {
+            return null;
+        }
+
+        return `${resolvedBasePath}${suffix}`;
+    }
+
+    /**
+     * Find file path by exact path, md extension fallback, or basename match.
+     */
+    private findWikiFilePath(linkPath: string): string | null {
+        const direct = this.app.vault.getAbstractFileByPath(linkPath);
+        if (direct instanceof TFile) {
+            return direct.path;
+        }
+
+        if (!linkPath.endsWith('.md')) {
+            const withMd = this.app.vault.getAbstractFileByPath(`${linkPath}.md`);
+            if (withMd instanceof TFile) {
+                return withMd.path;
+            }
+        }
+
+        const markdownFiles = this.app.vault.getMarkdownFiles();
+        const normalizedLinkPath = linkPath.toLowerCase();
+        const matched = markdownFiles.find((file) => {
+            const basename = file.basename?.toLowerCase() || file.name.replace(/\.md$/i, '').toLowerCase();
+            return (
+                basename === normalizedLinkPath ||
+                file.path.toLowerCase() === normalizedLinkPath ||
+                file.path.toLowerCase().includes(normalizedLinkPath)
+            );
+        });
+
+        return matched?.path || null;
+    }
+
+    /**
+     * Derive readable display name from wiki link target.
+     */
+    private getWikiLinkDisplayName(target: string): string {
+        const basePath = target.split('#')[0].trim();
+        if (!basePath) {
+            return target;
+        }
+        const segments = basePath.split('/');
+        return segments[segments.length - 1] || basePath;
     }
 }
