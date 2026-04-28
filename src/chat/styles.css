@@ -597,11 +597,6 @@
     position: relative;
 }
 
-/* Model selector style */
-.model-selector {
-    /* No margin-left here, it's on the wrapper */
-}
-
 .model-selector .model-label {
     color: var(--text-accent);
     font-weight: 500;
@@ -819,10 +814,20 @@
     opacity: 0.6;
     color: inherit;
     line-height: 1;
+    box-shadow: none;
 }
 
 .tag-remove:hover {
     opacity: 1;
+    background: transparent !important;
+}
+
+.tag-remove:focus,
+.tag-remove:focus-visible,
+.context-tag .tag-remove:focus,
+.context-tag .tag-remove:hover {
+    background: transparent !important;
+    box-shadow: none;
 }
 
 /* Legacy context-tags (in toolbar) - keep for compatibility */
@@ -878,6 +883,13 @@
 }
 
 /* ============================================
+    .context-tags-area .tag-remove,
+    .context-tags-area .tag-remove:not(:focus),
+    .context-tags-area .tag-remove:active,
+    .context-tags-area .tag-remove:visited {
+        background: transparent !important;
+        box-shadow: none;
+    }
    Loading Animation
    ============================================ */
 
@@ -919,7 +931,8 @@
     border-radius: 8px;
     box-shadow: var(--shadow-s);
     z-index: 100;
-    max-height: 300px;
+    max-height: 360px;
+    min-height: 280px;
     overflow: hidden;
 }
 
@@ -935,13 +948,29 @@
 }
 
 .file-selector-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    display: block;
     padding: 8px 12px;
     background: var(--background-secondary);
     border-bottom: 1px solid var(--background-modifier-border);
     font-size: 12px;
+}
+
+.file-selector-search-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
+    color: var(--text-normal);
+    font-size: 12px;
+    box-shadow: none;
+}
+
+.file-selector-search-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
 }
 
 .file-selector-path {
@@ -958,6 +987,7 @@
     flex: 1;
     overflow-y: auto;
     max-height: 250px;
+    min-height: 190px;
 }
 
 .file-selector-item {
@@ -1332,6 +1362,9 @@
 .model-edit-modal select {
     width: 100%;
     padding: 8px 12px;
+    box-shadow: none !important;
+    filter: none !important;
+    text-shadow: none !important;
     border: 1px solid var(--background-modifier-border);
     border-radius: 6px;
     background: var(--background-primary);
@@ -1354,6 +1387,20 @@
     padding-top: 6px;
     padding-bottom: 6px;
     cursor: pointer;
+}
+
+.model-edit-modal .provider-select-input {
+    box-shadow: none !important;
+    filter: none !important;
+    text-shadow: none !important;
+    background-image: none !important;
+}
+
+.model-edit-modal .provider-select-input:hover,
+.model-edit-modal .provider-select-input:active,
+.model-edit-modal .provider-select-input:not(:focus) {
+    box-shadow: none !important;
+    filter: none !important;
 }
 
 .modal-button-container {

@@ -11,7 +11,7 @@
 import { ItemView, WorkspaceLeaf, Notice, TFile } from 'obsidian';
 import './styles.css';
 import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall, ModelConfig, FileReference } from '../types';
-import { ContextManager, getAvailableContextSources } from '../context/ContextManager';
+import { ContextManager, estimateTokens, getAvailableContextSources } from '../context/ContextManager';
 import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
@@ -769,20 +769,31 @@ export class EnhancedChatView extends ItemView {
      */
     private updateTokenDisplay(): void {
         if (!this.tokenDisplayEl) return;
-        
-        // Calculate used tokens from contexts
-        const contextTokens = this.contexts.reduce((sum, ctx) => sum + (ctx.tokens || 0), 0);
-        
-        // Calculate used tokens from conversation messages
+
+        // Approximate request payload tokens to better match what is actually sent to model.
+        const baseSystemPromptTokens = estimateTokens(this.buildBaseSystemPrompt());
+        const toolSchemaTokens = estimateTokens(JSON.stringify(getOllamaTools()));
+
+        let contextPromptTokens = 0;
+        if (this.contexts.length > 0 && this.contextManager) {
+            this.contextManager.deserialize(this.contexts);
+            contextPromptTokens = estimateTokens(this.contextManager.assemblePrompt());
+        }
+
         const messageTokens = this.messages.reduce((sum, msg) => {
-            // Estimate tokens: ~4 chars per token for English, ~1.5 for Chinese
-            const content = msg.content || '';
-            const chineseChars = (content.match(/[\u4e00-\u9fa5]/g) || []).length;
-            const otherChars = content.length - chineseChars;
-            return sum + Math.ceil(chineseChars / 1.5 + otherChars / 4);
+            return sum + estimateTokens(msg.content || '');
         }, 0);
-        
-        const usedTokens = contextTokens + messageTokens;
+
+        const draftInputTokens = this.inputEl ? estimateTokens(this.inputEl.value || '') : 0;
+        const requestOverheadTokens = 120;
+
+        const usedTokens =
+            baseSystemPromptTokens +
+            toolSchemaTokens +
+            contextPromptTokens +
+            messageTokens +
+            draftInputTokens +
+            requestOverheadTokens;
         
         // Get max context length from current model or settings
         const currentModelConfig = this.plugin.settings.models.find(m => m.id === this.plugin.settings.currentModelId);
@@ -800,6 +811,45 @@ export class EnhancedChatView extends ItemView {
         } else {
             this.tokenDisplayEl.removeClass('token-warning');
         }
+    }
+
+    private buildBaseSystemPrompt(): string {
+        return `You are the WikiChat assistant, an AI assistant specialized in maintaining and managing knowledge bases. You can help users ingest knowledge, answer queries, and maintain the knowledge base.
+
+You can use the following tools to complete tasks:
+- read_file: Read full file contents from vault
+- write_file: Write content to file
+- append_file: Append content to file
+- delete_file: Delete file
+- list_files: List files in directory
+- search_files: Search file contents
+- create_directory: Create directory
+- create_wiki_page: Create Wiki page
+- update_wiki_page: Update Wiki page
+- Read_Summary: Read only the Summary section
+- Update_Summary: Modify only the Summary section
+- Read_Property: Read only one frontmatter property
+- Update_Property: Modify only one frontmatter property
+- Update_Content: Modify only the Content section
+- Read_Part: Read only one named section
+- Update_Part: Modify only one named section
+- add_backlink: Add bidirectional link
+- update_index: Update Wiki index
+
+Tool selection rules:
+- When searching articles, use staged retrieval: Read_Property first, then Read_Summary, and only read full content when relevance is high.
+- Consider relevance high only when title/tags/related or summary clearly match the user intent.
+- If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
+- If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
+- If the user asks to update one specific section by heading title, prefer Update_Part.
+- Use update_wiki_page only when the whole page body needs broad replacement or append behavior.
+
+Examples:
+- "Find articles about vector database indexing" -> Read_Property on candidates, then Read_Summary, then read_file only for high-match pages
+- "Read the Related Links section of this page" -> Read_Part with part: "Related Links"
+- "Rewrite only the Content section, keep summary and metadata unchanged" -> Update_Content
+
+When you need to use tools, please call the corresponding tool functions.`;
     }
 
     // === Dropdown Methods ===
@@ -1184,42 +1234,7 @@ export class EnhancedChatView extends ItemView {
             const relevantIndexContext = await this.getRelevantIndexContext(messageText);
 
             // Build system prompt (including tool descriptions)
-            let systemPrompt = `You are the WikiChat assistant, an AI assistant specialized in maintaining and managing knowledge bases. You can help users ingest knowledge, answer queries, and maintain the knowledge base.
-
-You can use the following tools to complete tasks:
-- read_file: Read full file contents from vault
-- write_file: Write content to file
-- append_file: Append content to file
-- delete_file: Delete file
-- list_files: List files in directory
-- search_files: Search file contents
-- create_directory: Create directory
-- create_wiki_page: Create Wiki page
-- update_wiki_page: Update Wiki page
-- Read_Summary: Read only the Summary section
-- Update_Summary: Modify only the Summary section
-- Read_Property: Read only one frontmatter property
-- Update_Property: Modify only one frontmatter property
-- Update_Content: Modify only the Content section
-- Read_Part: Read only one named section
-- Update_Part: Modify only one named section
-- add_backlink: Add bidirectional link
-- update_index: Update Wiki index
-
-Tool selection rules:
-- When searching articles, use staged retrieval: Read_Property first, then Read_Summary, and only read full content when relevance is high.
-- Consider relevance high only when title/tags/related or summary clearly match the user intent.
-- If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
-- If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
-- If the user asks to update one specific section by heading title, prefer Update_Part.
-- Use update_wiki_page only when the whole page body needs broad replacement or append behavior.
-
-Examples:
-- "Find articles about vector database indexing" -> Read_Property on candidates, then Read_Summary, then read_file only for high-match pages
-- "Read the Related Links section of this page" -> Read_Part with part: "Related Links"
-- "Rewrite only the Content section, keep summary and metadata unchanged" -> Update_Content
-
-When you need to use tools, please call the corresponding tool functions.`;
+            let systemPrompt = this.buildBaseSystemPrompt();
 
             if (relevantIndexContext) {
                 systemPrompt += `\n\n## Regex-Matched Index Blocks\n\n\`\`\`\n${relevantIndexContext}\n\`\`\`\n\nThese blocks were filtered from ${this.plugin.settings.wikiPath}/index.md using regex matches derived from the latest user message. Use them as the first retrieval hint, and read index.md or specific pages with tools when more detail is needed.`;

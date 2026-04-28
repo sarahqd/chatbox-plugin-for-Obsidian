@@ -868,6 +868,7 @@ class ModelEditModal extends Modal {
                     this.updateProviderDefaults(value);
                 });
                 this.providerSelect = dropdown.selectEl;
+                this.providerSelect.addClass('provider-select-input');
             });
 
         // Model ID
