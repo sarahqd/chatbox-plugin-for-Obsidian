@@ -8,19 +8,79 @@ import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '.
 import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools, getQueryTools } from '../tools';
 import { buildRegexFilteredIndex } from './indexContext';
+import type { WikiSearchEngine } from '../search/WikiSearchEngine';
+
+// Maximum characters per tool result is computed dynamically from the active model's
+// context window — see maxToolResultChars inside queryWiki().
 
 // Compact system prompt (~50 tokens) — keeps local model context budget low.
 // Workflow rules are embedded in the user message instead.
 const SYSTEM_PROMPT = `You are a Wiki query assistant. Answer ONLY from content found in the Wiki. Never use external knowledge or make inferences beyond what is explicitly stated. Cite every fact as [[page-name]]. If the Wiki lacks relevant information, state that clearly. Output in Markdown.`;
 
 /**
- * Query the Wiki knowledge base
+ * Build a compact context block from BM25 search results.
+ * Pre-fetches Read_Summary I/O for each candidate (no LLM call) so the model
+ * can answer in a single pass without tool calls for most queries.
+ */
+async function buildBM25Context(
+    app: App,
+    settings: LLMWikiSettings,
+    question: string,
+    searchEngine: WikiSearchEngine,
+    topN = 8
+): Promise<{ contextText: string; sources: string[] }> {
+    const results = searchEngine.search(question, topN);
+    if (results.length === 0) {
+        return { contextText: '(No matching pages found in BM25 index)', sources: [] };
+    }
+
+    const sources: string[] = [];
+    const lines: string[] = [];
+
+    // Fetch summaries for all results in parallel (I/O only, no LLM).
+    const summaries = await Promise.all(
+        results.map(async (result) => {
+            if (result.summary) return result.summary;
+            try {
+                const file = app.vault.getAbstractFileByPath(result.path);
+                if (file instanceof TFile) {
+                    const raw = await app.vault.read(file);
+                    const m = raw.match(/^## Summary\s*\n([\s\S]*?)(?=^##|\z)/m);
+                    return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+                }
+            } catch (_) { /* ignore read errors */ }
+            return '';
+        })
+    );
+
+    for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        sources.push(result.path);
+        const summary = summaries[i];
+
+        lines.push(`### [[${result.path.replace(/\.md$/, '')}|${result.title}]]`);
+        if (summary) {
+            lines.push(summary);
+        }
+        lines.push('');
+    }
+
+    return { contextText: lines.join('\n'), sources };
+}
+
+/**
+ * Query the Wiki knowledge base.
+ *
+ * @param searchEngine  Optional pre-built WikiSearchEngine (BM25 in-memory index).
+ *                      When provided, replaces the slow index.md full-file read with
+ *                      an O(1) in-memory BM25 search — critical for 10k+ document wikis.
  */
 export async function queryWiki(
     app: App,
     settings: LLMWikiSettings,
     question: string,
-    onChunk?: (text: string) => void
+    onChunk?: (text: string) => void,
+    searchEngine?: WikiSearchEngine
 ): Promise<QueryResult> {
     const client = getLLMClient(settings);
     const context: ToolContext = {
@@ -30,58 +90,89 @@ export async function queryWiki(
     };
 
     try {
-        // Read Wiki index first
-        const indexPath = `${settings.wikiPath}/index.md`;
-        const indexFile = app.vault.getAbstractFileByPath(indexPath);
-        let indexContent = '';
-        
-        if (indexFile instanceof TFile) {
-            indexContent = await app.vault.read(indexFile);
-        }
+        let retrievalContext = '';
+        let preFetchedSources: string[] = [];
 
-        const filteredIndexContent = buildRegexFilteredIndex(indexContent, question);
+        if (searchEngine?.isReady()) {
+            // Fast path: BM25 in-memory search + pre-fetch summaries (zero LLM tokens wasted).
+            const { contextText, sources } = await buildBM25Context(app, settings, question, searchEngine);
+            retrievalContext = contextText;
+            preFetchedSources = sources;
+        } else {
+            // Fallback: read index.md (TOC of slice files) from the dedicated index directory,
+            // then read every slice file it references and concatenate before filtering.
+            const idxDir = settings.indexPath || 'WikiIndex';
+            const tocFile = app.vault.getAbstractFileByPath(`${idxDir}/index.md`);
+            let combinedContent = '';
+            if (tocFile instanceof TFile) {
+                const tocContent = await app.vault.read(tocFile);
+                // Extract wikilink targets: [[idxDir/YYYY-MM|label]] → "idxDir/YYYY-MM"
+                const linkRe = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+                let m: RegExpExecArray | null;
+                const sliceReads: Promise<string>[] = [];
+                while ((m = linkRe.exec(tocContent)) !== null) {
+                    const target = m[1].trim();
+                    const slicePath = target.endsWith('.md') ? target : `${target}.md`;
+                    const sliceFile = app.vault.getAbstractFileByPath(slicePath);
+                    if (sliceFile instanceof TFile) {
+                        sliceReads.push(app.vault.read(sliceFile));
+                    }
+                }
+                const sliceContents = await Promise.all(sliceReads);
+                combinedContent = sliceContents.join('\n\n');
+            }
+            retrievalContext = buildRegexFilteredIndex(combinedContent, question);
+        }
 
         // Build initial message — workflow rules are here to keep the system prompt short.
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `Answer the following question using ONLY the Wiki content.
-
-## Retrieval rules (follow in order)
-1. Screen candidates with Read_Property then Read_Summary before reading full pages.
-2. Call read_file only for pages with high relevance confirmed by summary.
-3. Cite every fact as [[page-name]]. No external knowledge.
-4. If the Wiki lacks the info, say so explicitly.
+                content: `Answer the following question using ONLY the Wiki content below.
+If the provided context is sufficient, answer directly without calling any tools.
+Only use Read_Summary or read_file if a specific page not shown below is clearly needed.
 
 ## Question
 ${question}
 
-## Pre-filtered Wiki Index
-\`\`\`
-${filteredIndexContent}
-\`\`\`
-
-If the index excerpt is insufficient, use Read_Property or Read_Summary on candidate pages.`,
+## Retrieved Wiki Context (BM25 ranked)
+${retrievalContext}`,
             },
         ];
 
-        // Run agentic loop — limited to 3 iterations and read-only tools for local model efficiency.
+        // Run agentic loop — capped at 2 iterations for local model budget.
+        // Most queries answer in 0 tool calls when BM25 context is pre-loaded.
+        // Compute per-call tool result budget from current model's context window.
+        const activeModel = settings.models.find(m => m.id === settings.currentModelId);
+        const maxCtx = activeModel?.contextLength || settings.maxContextTokens || 8192;
+        const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
         const tools = getQueryTools();
         let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
         let iterations = 0;
-        const maxIterations = 3;
-        const sources: string[] = [];
+        const maxIterations = 2;
+        const sources: string[] = [...preFetchedSources];
 
         while (iterations < maxIterations) {
             iterations++;
 
             if (response.toolCalls && response.toolCalls.length > 0) {
-                for (const toolCall of response.toolCalls) {
-                    const result = await executeTool(
-                        toolCall.function.name,
-                        toolCall.function.arguments,
-                        context
-                    );
+                // Push assistant message once before executing tool calls (not per-call).
+                messages.push({
+                    role: 'assistant',
+                    content: '',
+                    toolCalls: response.toolCalls,
+                });
+
+                // Execute all tool calls in parallel — all query tools are read-only.
+                const toolResults = await Promise.all(
+                    response.toolCalls.map(tc =>
+                        executeTool(tc.function.name, tc.function.arguments, context)
+                    )
+                );
+
+                for (let i = 0; i < response.toolCalls.length; i++) {
+                    const toolCall = response.toolCalls[i];
+                    const result = toolResults[i];
 
                     // Track which pages were read
                     if (
@@ -91,19 +182,21 @@ If the index excerpt is insufficient, use Read_Property or Read_Summary on candi
                         toolCall.function.name === 'Read_Part'
                     ) {
                         const path = toolCall.function.arguments.path as string;
-                        if (path.startsWith(settings.wikiPath) && !sources.includes(path)) {
+                        if (path && path.startsWith(settings.wikiPath) && !sources.includes(path)) {
                             sources.push(path);
                         }
                     }
 
-                    messages.push({
-                        role: 'assistant',
-                        content: '',
-                        toolCalls: response.toolCalls,
-                    });
+                    // Truncate large tool results to prevent context overflow on small models.
+                    let resultStr = JSON.stringify(result);
+                    if (resultStr.length > maxToolResultChars) {
+                        const truncated = { ...result, data: resultStr.slice(0, maxToolResultChars) + '…(truncated)' };
+                        resultStr = JSON.stringify(truncated);
+                    }
+
                     messages.push({
                         role: 'tool',
-                        content: JSON.stringify(result),
+                        content: resultStr,
                         toolCallId: toolCall.id,
                     });
                 }
@@ -167,26 +260,38 @@ export async function chatWiki(
         })).message;
         let iterations = 0;
         const maxIterations = 5;
+        const activeModel = settings.models.find(m => m.id === settings.currentModelId);
+        const maxCtx = activeModel?.contextLength || settings.maxContextTokens || 8192;
+        const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
 
         while (iterations < maxIterations) {
             iterations++;
 
             if (response.toolCalls && response.toolCalls.length > 0) {
-                for (const toolCall of response.toolCalls) {
-                    const result = await executeTool(
-                        toolCall.function.name,
-                        toolCall.function.arguments,
-                        context
-                    );
+                // Push assistant message once before executing tool calls (not per-call).
+                messages.push({
+                    role: 'assistant',
+                    content: '',
+                    toolCalls: response.toolCalls,
+                });
 
-                    messages.push({
-                        role: 'assistant',
-                        content: '',
-                        toolCalls: response.toolCalls,
-                    });
+                // Execute all tool calls in parallel.
+                const toolResults = await Promise.all(
+                    response.toolCalls.map(tc =>
+                        executeTool(tc.function.name, tc.function.arguments, context)
+                    )
+                );
+
+                for (let i = 0; i < response.toolCalls.length; i++) {
+                    const toolCall = response.toolCalls[i];
+                    let resultStr = JSON.stringify(toolResults[i]);
+                    if (resultStr.length > maxToolResultChars) {
+                        const truncated = { ...toolResults[i], data: resultStr.slice(0, maxToolResultChars) + '…(truncated)' };
+                        resultStr = JSON.stringify(truncated);
+                    }
                     messages.push({
                         role: 'tool',
-                        content: JSON.stringify(result),
+                        content: resultStr,
                         toolCallId: toolCall.id,
                     });
                 }

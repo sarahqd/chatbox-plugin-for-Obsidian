@@ -11,6 +11,7 @@ import { ingestFile, ingestContent, ingestFiles } from './flows/ingest';
 import { queryWiki } from './flows/query';
 import { lintWiki } from './flows/lint';
 import { EnhancedChatView } from './chat/EnhancedChatView';
+import { WikiSearchEngine } from './search/WikiSearchEngine';
 
 // View type constant
 const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
@@ -20,6 +21,8 @@ const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
  */
 export default class LLMWikiPlugin extends Plugin {
     settings!: LLMWikiSettings;
+    /** Shared BM25 index — built once on load, kept in-sync via vault events. */
+    searchEngine!: WikiSearchEngine;
     private autoLintTimer: number | null = null;
     private isLintRunning = false;
     private autoIngestTimer: number | null = null;
@@ -99,6 +102,22 @@ export default class LLMWikiPlugin extends Plugin {
 
         // Initialize source-file auto-ingest trigger
         this.setupAutoIngestTrigger();
+
+        // Build shared BM25 index (zero I/O — uses metadataCache).
+        // Kept in-sync via vault events so queryWiki can skip reading index.md.
+        this.searchEngine = new WikiSearchEngine(this.app, this.settings);
+        this.app.workspace.onLayoutReady(() => {
+            this.searchEngine.build();
+            this.registerEvent(this.app.vault.on('create', f => {
+                if (f instanceof TFile && f.extension === 'md') this.searchEngine.onFileCreated(f);
+            }));
+            this.registerEvent(this.app.vault.on('delete', f => {
+                if (f instanceof TFile) this.searchEngine.onFileDeleted(f.path);
+            }));
+            this.registerEvent(this.app.vault.on('modify', f => {
+                if (f instanceof TFile && f.extension === 'md') this.searchEngine.onFileChanged(f);
+            }));
+        });
 
         console.log('WikiChat Plugin loaded');
     }

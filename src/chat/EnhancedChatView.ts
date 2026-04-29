@@ -726,9 +726,9 @@ export class EnhancedChatView extends ItemView {
         modelSelector.createSpan({ text: ' ▼', cls: 'model-arrow' });
         modelSelector.onClickEvent(() => this.toggleModelDropdown());
 
-        // Token display (used/max in k units)
-        this.tokenDisplayEl = modelSelectorWrapper.createSpan({ cls: 'token-display' });
-        this.updateTokenDisplay();
+        // Token display (used/max in k units) - hidden
+        // this.tokenDisplayEl = modelSelectorWrapper.createSpan({ cls: 'token-display' });
+        // this.updateTokenDisplay();
 
         // Model dropdown
         this.modelDropdownEl = modelSelectorWrapper.createDiv({ cls: 'combobox-dropdown model-dropdown hidden' });
@@ -1272,10 +1272,18 @@ When you need to use tools, please call the corresponding tool functions.`;
                 systemPrompt += `\n\n## Context Information\n${contextContent}`;
             }
 
-            // Build message list
+            // Build message list.
+            // For small-context local models (≤8k tokens), keep fewer turns to leave
+            // room for the system prompt, BM25 context, and tool schemas.
+            const currentModelConfig = this.plugin.settings.models.find(
+                m => m.id === this.plugin.settings.currentModelId
+            );
+            const maxCtx = currentModelConfig?.contextLength || this.plugin.settings.maxContextTokens || 8192;
+            const historyTurns = maxCtx <= 8192 ? 4 : 10;
+
             const recentMessages = this.messages
                 .filter(m => m.role !== 'system')
-                .slice(-10);
+                .slice(-historyTurns);
 
             const messages: OllamaMessage[] = [];
             for (const msg of recentMessages) {
@@ -1295,8 +1303,9 @@ When you need to use tools, please call the corresponding tool functions.`;
             // Get tool definitions
             const tools = getOllamaTools();
             
-            // Tool call loop
-            let maxIterations = 5; // Prevent infinite loop
+            // Tool call loop — capped at 2 for local models (gemma4 etc.).
+            // Each LLM call on a 4B local model takes ~15-30s; 2 calls fits in 1 min.
+            let maxIterations = 3; // Prevent infinite loop and timeout on local models
             let iteration = 0;
             let useTools = true; // Whether to use tools
             
@@ -1388,10 +1397,18 @@ When you need to use tools, please call the corresponding tool functions.`;
                                     this.appendToLastMessage(`\n❌ **Tool execution failed:** ${result.error}`);
                                 }
                                 
-                                // Add tool result to message list
+                                // Add tool result to message list.
+                                // Truncate large results based on the active model's context window.
+                                // Budget: ~50% of context for tool results (4 chars ≈ 1 token).
+                                const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
+                                let toolResultStr = JSON.stringify(result);
+                                if (toolResultStr.length > maxToolResultChars) {
+                                    const truncated = { success: result.success, data: toolResultStr.slice(0, maxToolResultChars) + '…(truncated)' };
+                                    toolResultStr = JSON.stringify(truncated);
+                                }
                                 toolResults.push({
                                     role: 'tool',
-                                    content: JSON.stringify(result),
+                                    content: toolResultStr,
                                     toolCallId: toolCall.id
                                 });
                             } catch (error) {

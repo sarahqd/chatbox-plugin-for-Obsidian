@@ -32,15 +32,17 @@ export function getTool(name: string): ToolDefinition | undefined {
 /**
  * Get all tools as Ollama tool definitions
  */
+const _cachedOllamaTools: OllamaTool[] = allTools.map((tool) => ({
+    type: 'function' as const,
+    function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+    },
+}));
+
 export function getOllamaTools(): OllamaTool[] {
-    return allTools.map((tool) => ({
-        type: 'function' as const,
-        function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-        },
-    }));
+    return _cachedOllamaTools;
 }
 
 /**
@@ -49,17 +51,19 @@ export function getOllamaTools(): OllamaTool[] {
  */
 const QUERY_TOOL_NAMES = new Set(['read_file', 'Read_Summary', 'Read_Property', 'Read_Part']);
 
+const _cachedQueryTools: OllamaTool[] = allTools
+    .filter((tool) => QUERY_TOOL_NAMES.has(tool.name))
+    .map((tool) => ({
+        type: 'function' as const,
+        function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        },
+    }));
+
 export function getQueryTools(): OllamaTool[] {
-    return allTools
-        .filter((tool) => QUERY_TOOL_NAMES.has(tool.name))
-        .map((tool) => ({
-            type: 'function' as const,
-            function: {
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-            },
-        }));
+    return _cachedQueryTools;
 }
 
 /**

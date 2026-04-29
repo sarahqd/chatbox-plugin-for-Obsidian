@@ -937,7 +937,6 @@ export const updateIndexTool: ToolDefinition = {
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
         const settings = context.settings;
-        const wikiIndexPath = normalizePath(`${settings.wikiPath}/index.md`);
         const idxDir = normalizePath(settings.indexPath || 'WikiIndex');
 
         try {
@@ -946,12 +945,12 @@ export const updateIndexTool: ToolDefinition = {
                 await vault.createFolder(idxDir);
             }
 
-            // Collect all wiki pages (excluding the internal index.md in wikiPath)
+            // Collect all wiki content pages (only files under wikiPath, none from idxDir)
             const pages: { title: string; path: string; tags: string[]; created: string; updated: string }[] = [];
             const files = vault.getMarkdownFiles() as TFile[];
 
             for (const file of files) {
-                if (!file.path.startsWith(settings.wikiPath + '/') || file.path === wikiIndexPath) continue;
+                if (!file.path.startsWith(settings.wikiPath + '/')) continue;
                 const content = await vault.read(file);
                 const { frontmatter } = parseFrontmatter(content);
                 pages.push({
@@ -963,22 +962,10 @@ export const updateIndexTool: ToolDefinition = {
                 });
             }
 
-            // ── Build internal compact index in wikiPath/index.md (for LLM context) ──
+            // index.md is written last (after slices) so it lists the actual slice files.
+            // Capture now/lastUpdated for reuse in the TOC.
             const now = new Date();
             const lastUpdated = now.toISOString().split('T')[0] + ' ' + now.toTimeString().split(' ')[0];
-            let compactIndex = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n`;
-            const sortedByTitle = [...pages].sort((a, b) => a.title.localeCompare(b.title));
-            for (const page of sortedByTitle) {
-                const dateStr = page.updated || page.created;
-                const dateDisplay = dateStr ? ` (${dateStr})` : '';
-                compactIndex += `- ${pathToWikilinkWithAlias(page.path, page.title)}${dateDisplay}\n`;
-            }
-            const wikiIndexFile = vault.getAbstractFileByPath(wikiIndexPath);
-            if (wikiIndexFile instanceof TFile) {
-                await vault.modify(wikiIndexFile, compactIndex);
-            } else {
-                await vault.create(wikiIndexPath, compactIndex);
-            }
 
             // ── Group pages by YYYY-MM (using created date, fallback to updated) ──
             const grouped: Record<string, typeof pages> = {};
@@ -1045,14 +1032,13 @@ export const updateIndexTool: ToolDefinition = {
                 sliceFileNames.push('undated.md');
             }
 
-            // ── Write indexPath/index.md as TOC of slice files ──
+            // ── Write idxDir/index.md as TOC of all slice files ──
             const tocPath = normalizePath(`${idxDir}/index.md`);
-            let tocContent = `# Wiki Index — Table of Contents\n\n_Auto-generated. For reading only, not searched._\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n---\n\n`;
+            let tocContent = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n`;
             for (const fname of sliceFileNames) {
                 const label = fname.replace('.md', '');
                 tocContent += `- [[${idxDir}/${label}|${label}]]\n`;
             }
-
             const tocFile = vault.getAbstractFileByPath(tocPath);
             if (tocFile instanceof TFile) {
                 await vault.modify(tocFile, tocContent);
