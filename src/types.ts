@@ -181,6 +181,16 @@ export interface ModelConfig {
     supportsVision?: boolean;
 }
 
+export interface EmbeddingModelConfig {
+    id: string;           // Unique identifier
+    name: string;         // Display name
+    provider: LLMProvider;
+    modelId: string;      // Actual embedding model ID for API calls
+    baseUrl: string;      // Base URL for this embedding model/provider
+    apiKey?: string;      // Optional API key
+    dimensions?: number;  // Embedding vector dimensions (informational)
+}
+
 // ============== Settings ==============
 
 export interface LLMWikiSettings {
@@ -195,7 +205,7 @@ export interface LLMWikiSettings {
     
     wikiPath: string;
     sourcesPath: string;
-    templatesPath: string;
+    indexPath: string;
     autoIngest: boolean;
     autoLint: boolean;
     lintInterval: number;
@@ -207,6 +217,10 @@ export interface LLMWikiSettings {
     chatHistoryPath: string;       // Chat history save path
     showHistoryPanel: boolean;     // Whether to show history panel
     maxHistoryDisplay: number;     // Max history panel display count
+    // Embedding / semantic search settings
+    embeddingModels: EmbeddingModelConfig[];
+    currentEmbeddingModelId: string; // '' = BM25 only
+    summaryMaxLength: number;        // Max chars for summary frontmatter field
 }
 
 // Default provider configurations
@@ -232,7 +246,7 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     
     wikiPath: 'Wiki',
     sourcesPath: 'Sources',
-    templatesPath: 'Templates',
+    indexPath: 'WikiIndex',
     autoIngest: true,
     autoLint: false,
     lintInterval: 60,
@@ -244,6 +258,10 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     chatHistoryPath: 'Sources/chats',
     showHistoryPanel: true,
     maxHistoryDisplay: 3,
+    // Embedding / semantic search defaults
+    embeddingModels: [],
+    currentEmbeddingModelId: '',
+    summaryMaxLength: 200,
 };
 
 // ============== Ollama API Types ==============
@@ -332,6 +350,7 @@ export interface WikiPageFrontmatter {
     title: string;
     created: string;
     updated: string;
+    summary?: string;   // Brief summary stored in frontmatter for zero-I/O search
     tags: string[];
     related: string[];  // Links to original files or related wiki pages (using [[link]] format)
 }

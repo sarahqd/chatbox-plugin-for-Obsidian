@@ -4,7 +4,7 @@
  */
 
 import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice, Modal, normalizePath, EventRef } from 'obsidian';
-import type { LLMWikiSettings, LLMProvider, ModelConfig } from './types';
+import type { LLMWikiSettings, LLMProvider, ModelConfig, EmbeddingModelConfig } from './types';
 import { DEFAULT_SETTINGS, PROVIDER_CATALOG, getProviderMetadata } from './types';
 import { getLLMClient, resetLLMClient } from './llm/client';
 import { ingestFile, ingestContent, ingestFiles } from './flows/ingest';
@@ -273,12 +273,12 @@ export default class LLMWikiPlugin extends Plugin {
     ): Promise<void> {
         const timestamp = new Date().toISOString();
         const logLine = `[${timestamp}] status=${status} ${details}`;
-        const pluginDir = normalizePath(`.obsidian/plugins/${this.manifest.id}`);
-        const logPath = normalizePath(`${pluginDir}/auto-ingest.log`);
+        const logDir = normalizePath(this.settings.indexPath || 'WikiIndex');
+        const logPath = normalizePath(`${logDir}/auto-ingest.log`);
 
         try {
-            if (!this.app.vault.getAbstractFileByPath(pluginDir)) {
-                await this.app.vault.createFolder(pluginDir);
+            if (!this.app.vault.getAbstractFileByPath(logDir)) {
+                await this.app.vault.createFolder(logDir);
             }
 
             const adapter = this.app.vault.adapter as unknown as {
@@ -309,7 +309,7 @@ export default class LLMWikiPlugin extends Plugin {
     ): Promise<void> {
         const timestamp = new Date().toISOString();
         const logLine = `[${timestamp}] mode=${mode} status=${status} ${details}`;
-        const logDir = normalizePath('.obsidian/wikichat-logs');
+        const logDir = normalizePath(this.settings.indexPath || 'WikiIndex');
         const logPath = normalizePath(`${logDir}/maintenance.log`);
 
         try {
@@ -380,7 +380,7 @@ export default class LLMWikiPlugin extends Plugin {
         const dirs = [
             this.settings.wikiPath,
             this.settings.sourcesPath,
-            this.settings.templatesPath,
+            this.settings.indexPath,
         ];
 
         for (const dir of dirs) {
@@ -596,6 +596,10 @@ class LLMWikiSettingTab extends PluginSettingTab {
         containerEl.createEl('h3', { text: 'Model Management' });
         this.renderModelManagement(containerEl);
 
+        // Embedding Model Management
+        containerEl.createEl('h3', { text: 'Embedding Models' });
+        this.renderEmbeddingModelManagement(containerEl);
+
         // Path Settings
         containerEl.createEl('h3', { text: 'Directory Configuration' });
 
@@ -627,14 +631,14 @@ class LLMWikiSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
-            .setName('Templates Directory')
-            .setDesc('Template file storage directory')
+            .setName('Index Directory')
+            .setDesc('Directory for human-readable time-slice index files and operation logs')
             .addText((text) =>
                 text
-                    .setPlaceholder('Templates')
-                    .setValue(this.plugin.settings.templatesPath)
+                    .setPlaceholder('WikiIndex')
+                    .setValue(this.plugin.settings.indexPath)
                     .onChange(async (value) => {
-                        this.plugin.settings.templatesPath = value;
+                        this.plugin.settings.indexPath = value;
                         await this.plugin.saveSettings();
                     })
             );
@@ -722,6 +726,74 @@ class LLMWikiSettingTab extends PluginSettingTab {
                         this.plugin.setupAutoLintSchedule();
                     })
             );
+    }
+
+    private renderEmbeddingModelManagement(containerEl: HTMLElement): void {
+        new Setting(containerEl)
+            .setName('Add Embedding Model')
+            .setDesc('Configure a model used for semantic reranking')
+            .addButton((button) =>
+                button
+                    .setButtonText('+ Add Embedding Model')
+                    .onClick(() => {
+                        new EmbeddingModelEditModal(this.app, this.plugin, null, () => this.display()).open();
+                    })
+            );
+
+        const models = this.plugin.settings.embeddingModels || [];
+
+        if (models.length > 0) {
+            // Table header
+            const container = containerEl.createDiv({ cls: 'model-list-container' });
+            const header = container.createDiv({ cls: 'model-table-header' });
+            header.createSpan({ text: 'Model Name', cls: 'model-header-name' });
+            header.createSpan({ text: 'Provider', cls: 'model-header-provider' });
+            header.createSpan({ text: 'Actions', cls: 'model-header-actions' });
+
+            const tableBody = container.createDiv({ cls: 'model-table-body' });
+            models.forEach(model => {
+                const row = tableBody.createDiv({ cls: 'model-row' });
+                row.createDiv({ cls: 'model-cell-name' }).createSpan({ text: model.name, cls: 'model-name' });
+                row.createDiv({ cls: 'model-cell-provider' }).createSpan({ text: model.provider, cls: 'model-provider' });
+                const actionsCell = row.createDiv({ cls: 'model-cell-actions' });
+
+                const editBtn = actionsCell.createEl('button', { cls: 'model-icon-btn model-edit-btn', attr: { title: 'Edit' } });
+                editBtn.setText('🖊');
+                editBtn.onClickEvent(() => {
+                    new EmbeddingModelEditModal(this.app, this.plugin, model, () => this.display()).open();
+                });
+
+                const deleteBtn = actionsCell.createEl('button', { cls: 'model-icon-btn model-delete-btn', attr: { title: 'Delete' } });
+                deleteBtn.setText('🗑');
+                deleteBtn.onClickEvent(async () => {
+                    const idx = this.plugin.settings.embeddingModels.findIndex(m => m.id === model.id);
+                    if (idx >= 0) {
+                        if (this.plugin.settings.currentEmbeddingModelId === model.id) {
+                            this.plugin.settings.currentEmbeddingModelId = '';
+                        }
+                        this.plugin.settings.embeddingModels.splice(idx, 1);
+                        await this.plugin.saveSettings();
+                        this.display();
+                    }
+                });
+            });
+        }
+
+        // Current embedding model selector
+        new Setting(containerEl)
+            .setName('Active Embedding Model')
+            .setDesc('Used for semantic reranking of BM25 results. "None" = BM25 only.')
+            .addDropdown((dropdown) => {
+                dropdown.addOption('', 'None (BM25 only)');
+                for (const m of this.plugin.settings.embeddingModels || []) {
+                    dropdown.addOption(m.id, m.name);
+                }
+                dropdown.setValue(this.plugin.settings.currentEmbeddingModelId || '');
+                dropdown.onChange(async (value) => {
+                    this.plugin.settings.currentEmbeddingModelId = value;
+                    await this.plugin.saveSettings();
+                });
+            });
     }
 
     private renderModelManagement(containerEl: HTMLElement): void {
@@ -1063,5 +1135,153 @@ class ModelEditModal extends Modal {
     onClose(): void {
         const { contentEl } = this;
         contentEl.empty();
+    }
+}
+
+/**
+ * Embedding Model Edit Modal — mirrors ModelEditModal for EmbeddingModelConfig
+ */
+class EmbeddingModelEditModal extends Modal {
+    private plugin: LLMWikiPlugin;
+    private model: EmbeddingModelConfig | null;
+    private onSave: () => void;
+
+    private nameInput!: HTMLInputElement;
+    private providerSelect!: HTMLSelectElement;
+    private modelIdInput!: HTMLInputElement;
+    private baseUrlInput!: HTMLInputElement;
+    private apiKeyInput!: HTMLInputElement;
+
+    private baseUrlSetting!: Setting;
+    private modelIdSetting!: Setting;
+    private apiKeySetting!: Setting;
+
+    constructor(app: App, plugin: LLMWikiPlugin, model: EmbeddingModelConfig | null, onSave: () => void) {
+        super(app);
+        this.plugin = plugin;
+        this.model  = model;
+        this.onSave = onSave;
+    }
+
+    onOpen(): void {
+        const { contentEl } = this;
+        contentEl.addClass('model-edit-modal');
+        contentEl.createEl('h2', { text: this.model ? 'Edit Embedding Model' : 'Add Embedding Model' });
+
+        new Setting(contentEl)
+            .setName('Display Name')
+            .setDesc('Name shown in the embedding model selector')
+            .addText((text) => {
+                this.nameInput = text.inputEl;
+                text.setValue(this.model?.name || '');
+            });
+
+        new Setting(contentEl)
+            .setName('Provider')
+            .setDesc('API provider for this embedding model')
+            .addDropdown((dropdown) => {
+                for (const provider of PROVIDER_CATALOG) {
+                    dropdown.addOption(provider.id, provider.displayName);
+                }
+                const defaultProvider = this.model?.provider || PROVIDER_CATALOG[0]?.id || 'Ollama';
+                dropdown.setValue(defaultProvider);
+                dropdown.onChange((value) => this.updateProviderDefaults(value));
+                this.providerSelect = dropdown.selectEl;
+                this.providerSelect.addClass('provider-select-input');
+            });
+
+        this.modelIdSetting = new Setting(contentEl)
+            .setName('Embedding Model ID')
+            .setDesc('e.g. nomic-embed-text, text-embedding-3-small')
+            .addText((text) => {
+                this.modelIdInput = text.inputEl;
+                text.setValue(this.model?.modelId || '');
+            });
+
+        this.baseUrlSetting = new Setting(contentEl)
+            .setName('Base URL')
+            .setDesc('Endpoint URL for embedding API')
+            .addText((text) => {
+                this.baseUrlInput = text.inputEl;
+                text.setValue(this.model?.baseUrl || '');
+            });
+
+        this.apiKeySetting = new Setting(contentEl)
+            .setName('API Key')
+            .setDesc('Required for cloud providers')
+            .addText((text) => {
+                this.apiKeyInput = text.inputEl;
+                text.setValue(this.model?.apiKey || '');
+            });
+
+        const initialProvider = this.model?.provider || PROVIDER_CATALOG[0]?.id || 'Ollama';
+        this.updateProviderDefaults(initialProvider, !this.model);
+
+        const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+        buttonContainer.createEl('button', { text: 'Cancel', cls: 'modal-cancel-btn' })
+            .onClickEvent(() => this.close());
+        buttonContainer.createEl('button', { text: 'Save', cls: 'modal-save-btn' })
+            .onClickEvent(() => void this.saveModel());
+    }
+
+    private updateProviderDefaults(provider: LLMProvider, isNewModel = false): void {
+        const metadata = getProviderMetadata(provider);
+        this.baseUrlInput.placeholder = metadata.defaultBaseUrl;
+        if (isNewModel && !this.baseUrlInput.value) {
+            this.baseUrlInput.value = metadata.defaultBaseUrl;
+        }
+        this.modelIdSetting.setDesc(metadata.modelIdHint);
+        this.baseUrlSetting.setName(metadata.baseUrlLabel || 'Base URL');
+        this.baseUrlSetting.setDesc(metadata.baseUrlDescription || 'Endpoint URL for embedding API');
+        this.apiKeySetting.setName(metadata.apiKeyLabel || 'API Key');
+        this.apiKeySetting.setDesc(metadata.apiKeyDescription || 'Required for cloud providers');
+        const needsApiKey = metadata.authMode !== 'none';
+        this.apiKeySetting.settingEl.style.display = needsApiKey ? 'flex' : 'none';
+    }
+
+    private async saveModel(): Promise<void> {
+        const name    = this.nameInput.value.trim();
+        const provider = this.providerSelect.value;
+        const modelId  = this.modelIdInput.value.trim();
+        const baseUrl  = this.baseUrlInput.value.trim();
+        const apiKey   = this.apiKeyInput.value.trim();
+        const metadata = getProviderMetadata(provider);
+
+        if (!name || !modelId || !baseUrl) {
+            new Notice('Name, Model ID, and Base URL are required');
+            return;
+        }
+        if (metadata.authMode === 'required' && !apiKey) {
+            new Notice('API Key is required for the selected provider');
+            return;
+        }
+
+        const cfg: EmbeddingModelConfig = {
+            id:       this.model?.id || `embed-${provider}-${modelId}-${Date.now()}`,
+            name,
+            provider,
+            modelId,
+            baseUrl,
+            apiKey:   apiKey || undefined,
+        };
+
+        if (!this.plugin.settings.embeddingModels) {
+            this.plugin.settings.embeddingModels = [];
+        }
+
+        if (this.model) {
+            const idx = this.plugin.settings.embeddingModels.findIndex(m => m.id === this.model!.id);
+            if (idx >= 0) this.plugin.settings.embeddingModels[idx] = cfg;
+        } else {
+            this.plugin.settings.embeddingModels.push(cfg);
+        }
+
+        await this.plugin.saveSettings();
+        this.close();
+        this.onSave();
+    }
+
+    onClose(): void {
+        this.contentEl.empty();
     }
 }

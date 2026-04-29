@@ -78,16 +78,11 @@ function generateFrontmatter(fm: WikiPageFrontmatter): string {
     const relatedYaml = fm.related.length > 0
         ? fm.related.map(r => `  - "${r}"`).join('\n')
         : '  []';
+
+    // Escape summary for YAML (single-line, quote if non-empty)
+    const summaryLine = fm.summary ? `\nsummary: "${fm.summary.replace(/"/g, '\\"').replace(/\n/g, ' ')}"` : '';
     
-    return `---
-title: ${fm.title}
-created: ${fm.created}
-updated: ${fm.updated}
-tags:
-${tagsYaml}
-related:
-${relatedYaml}
----`;
+    return `---\ntitle: ${fm.title}\ncreated: ${fm.created}\nupdated: ${fm.updated}${summaryLine}\ntags:\n${tagsYaml}\nrelated:\n${relatedYaml}\n---`;
 }
 
 /**
@@ -148,6 +143,12 @@ function parseFrontmatter(content: string): { frontmatter: WikiPageFrontmatter |
         tags,
         related,
     };
+
+    // Parse summary
+    const summaryMatch = fmText.match(/summary:\s*"?([^"\n]+)"?/);
+    if (summaryMatch) {
+        frontmatter.summary = summaryMatch[1].trim();
+    }
 
     return { frontmatter, body };
 }
@@ -346,6 +347,14 @@ export const createWikiPageTool: ToolDefinition = {
             related,
         };
 
+        // Extract summary from ## Summary section of the content for frontmatter
+        const summaryMaxLength = context.settings.summaryMaxLength ?? 200;
+        const summaryBodyMatch = content.match(/^## Summary\s*\n([\s\S]*?)(?=^##|\Z)/m);
+        const extractedSummary = summary || (summaryBodyMatch ? summaryBodyMatch[1].replace(/\s+/g, ' ').trim() : '');
+        if (extractedSummary) {
+            frontmatter.summary = extractedSummary.slice(0, summaryMaxLength);
+        }
+
         const fullContent = `${generateFrontmatter(frontmatter)}
 
 # ${title}
@@ -373,6 +382,11 @@ ${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
                     tags: tags.length > 0 ? tags : (existingFrontmatter?.tags || []),
                     related: related.length > 0 ? related : (existingFrontmatter?.related || []),
                 };
+
+                // Carry over extracted summary
+                if (extractedSummary) {
+                    mergedFrontmatter.summary = extractedSummary.slice(0, summaryMaxLength);
+                }
 
                 const updatedContent = `${generateFrontmatter(mergedFrontmatter)}
 
@@ -923,21 +937,21 @@ export const updateIndexTool: ToolDefinition = {
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
         const settings = context.settings;
-        const indexPath = normalizePath(`${settings.wikiPath}/index.md`);
+        const wikiIndexPath = normalizePath(`${settings.wikiPath}/index.md`);
+        const idxDir = normalizePath(settings.indexPath || 'WikiIndex');
 
         try {
-            // List all Wiki pages
-            const wikiFolder = vault.getAbstractFileByPath(settings.wikiPath);
-            if (!wikiFolder) {
-                return { success: false, error: 'Wiki folder not found' };
+            // Ensure index directory exists
+            if (!vault.getAbstractFileByPath(idxDir)) {
+                await vault.createFolder(idxDir);
             }
 
+            // Collect all wiki pages (excluding the internal index.md in wikiPath)
             const pages: { title: string; path: string; tags: string[]; created: string; updated: string }[] = [];
-            const files = vault.getMarkdownFiles();
+            const files = vault.getMarkdownFiles() as TFile[];
 
             for (const file of files) {
-                if (!file.path.startsWith(settings.wikiPath) || file.path === indexPath) continue;
-
+                if (!file.path.startsWith(settings.wikiPath + '/') || file.path === wikiIndexPath) continue;
                 const content = await vault.read(file);
                 const { frontmatter } = parseFrontmatter(content);
                 pages.push({
@@ -949,80 +963,104 @@ export const updateIndexTool: ToolDefinition = {
                 });
             }
 
-            // Sort pages by title
-            pages.sort((a, b) => a.title.localeCompare(b.title));
+            // ── Build internal compact index in wikiPath/index.md (for LLM context) ──
+            const now = new Date();
+            const lastUpdated = now.toISOString().split('T')[0] + ' ' + now.toTimeString().split(' ')[0];
+            let compactIndex = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n`;
+            const sortedByTitle = [...pages].sort((a, b) => a.title.localeCompare(b.title));
+            for (const page of sortedByTitle) {
+                const dateStr = page.updated || page.created;
+                const dateDisplay = dateStr ? ` (${dateStr})` : '';
+                compactIndex += `- ${pathToWikilinkWithAlias(page.path, page.title)}${dateDisplay}\n`;
+            }
+            const wikiIndexFile = vault.getAbstractFileByPath(wikiIndexPath);
+            if (wikiIndexFile instanceof TFile) {
+                await vault.modify(wikiIndexFile, compactIndex);
+            } else {
+                await vault.create(wikiIndexPath, compactIndex);
+            }
 
-            // Group by year (based on updated or created date)
+            // ── Group pages by YYYY-MM (using created date, fallback to updated) ──
             const grouped: Record<string, typeof pages> = {};
             const noDate: typeof pages = [];
-            
+
             for (const page of pages) {
-                const dateStr = page.updated || page.created;
-                if (dateStr) {
-                    // Extract year from date string (format: YYYY-MM-DD)
-                    const yearMatch = dateStr.match(/^(\d{4})/);
-                    if (yearMatch) {
-                        const year = yearMatch[1];
-                        if (!grouped[year]) grouped[year] = [];
-                        grouped[year].push(page);
-                    } else {
-                        noDate.push(page);
-                    }
+                const dateStr = page.created || page.updated;
+                const monthMatch = dateStr?.match(/^(\d{4}-\d{2})/);
+                if (monthMatch) {
+                    const ym = monthMatch[1];
+                    if (!grouped[ym]) grouped[ym] = [];
+                    grouped[ym].push(page);
                 } else {
                     noDate.push(page);
                 }
             }
 
-            // Generate index content (English)
-            const now = new Date();
-            const lastUpdated = now.toISOString().split('T')[0] + ' ' + now.toTimeString().split(' ')[0];
-            let indexContent = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n---\n\n## Index\n\n`;
+            // ── Write per-month slice files in indexPath ──
+            const sliceKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a)); // newest first
+            const sliceFileNames: string[] = [];
 
-            // Sort years in descending order (newest first)
-            const years = Object.keys(grouped).sort((a, b) => b.localeCompare(a));
-            
-            for (const year of years) {
-                indexContent += `### ${year}\n\n`;
-                // Sort pages within each year by date (newest first), then by title
-                const yearPages = grouped[year].sort((a, b) => {
-                    const dateA = a.updated || a.created || '';
-                    const dateB = b.updated || b.created || '';
-                    // Sort by date descending first
-                    if (dateA !== dateB) return dateB.localeCompare(dateA);
-                    // Then by title ascending
+            for (const ym of sliceKeys) {
+                const sliceFileName = `${ym}.md`;
+                sliceFileNames.push(sliceFileName);
+                const slicePath = normalizePath(`${idxDir}/${sliceFileName}`);
+
+                const monthPages = grouped[ym].sort((a, b) => {
+                    const da = a.created || a.updated || '';
+                    const db = b.created || b.updated || '';
+                    if (da !== db) return db.localeCompare(da);
                     return a.title.localeCompare(b.title);
                 });
-                
-                for (const page of yearPages) {
-                    const dateStr = page.updated || page.created;
+
+                let sliceContent = `# Wiki Pages — ${ym}\n\n_Auto-generated. For reading only, not searched._\n\n`;
+                for (const page of monthPages) {
+                    const dateStr = page.created || page.updated;
                     const dateDisplay = dateStr ? ` _(${dateStr})_` : '';
                     const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
-                    const pageLink = pathToWikilinkWithAlias(page.path, page.title);
-                    indexContent += `- ${pageLink}${dateDisplay}${tagStr}\n`;
+                    sliceContent += `- ${pathToWikilinkWithAlias(page.path, page.title)}${dateDisplay}${tagStr}\n`;
                 }
-                indexContent += '\n';
+
+                const sliceFile = vault.getAbstractFileByPath(slicePath);
+                if (sliceFile instanceof TFile) {
+                    await vault.modify(sliceFile, sliceContent);
+                } else {
+                    await vault.create(slicePath, sliceContent);
+                }
             }
-            
-            // Add pages without dates at the end
+
+            // Handle undated pages in a separate slice
             if (noDate.length > 0) {
-                indexContent += `### Undated\n\n`;
+                const undatedPath = normalizePath(`${idxDir}/undated.md`);
+                let undatedContent = `# Wiki Pages — Undated\n\n_Auto-generated. For reading only, not searched._\n\n`;
                 for (const page of noDate) {
                     const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
-                    const pageLink = pathToWikilinkWithAlias(page.path, page.title);
-                    indexContent += `- ${pageLink}${tagStr}\n`;
+                    undatedContent += `- ${pathToWikilinkWithAlias(page.path, page.title)}${tagStr}\n`;
                 }
-                indexContent += '\n';
+                const undatedFile = vault.getAbstractFileByPath(undatedPath);
+                if (undatedFile instanceof TFile) {
+                    await vault.modify(undatedFile, undatedContent);
+                } else {
+                    await vault.create(undatedPath, undatedContent);
+                }
+                sliceFileNames.push('undated.md');
             }
 
-            // Write index
-            const indexFile = vault.getAbstractFileByPath(indexPath);
-            if (indexFile instanceof TFile) {
-                await vault.modify(indexFile, indexContent);
+            // ── Write indexPath/index.md as TOC of slice files ──
+            const tocPath = normalizePath(`${idxDir}/index.md`);
+            let tocContent = `# Wiki Index — Table of Contents\n\n_Auto-generated. For reading only, not searched._\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n---\n\n`;
+            for (const fname of sliceFileNames) {
+                const label = fname.replace('.md', '');
+                tocContent += `- [[${idxDir}/${label}|${label}]]\n`;
+            }
+
+            const tocFile = vault.getAbstractFileByPath(tocPath);
+            if (tocFile instanceof TFile) {
+                await vault.modify(tocFile, tocContent);
             } else {
-                await vault.create(indexPath, indexContent);
+                await vault.create(tocPath, tocContent);
             }
 
-            return { success: true, data: { pageCount: pages.length } };
+            return { success: true, data: { pageCount: pages.length, slices: sliceFileNames.length } };
         } catch (error) {
             return { success: false, error: String(error) };
         }
@@ -1074,7 +1112,13 @@ export const logOperationTool: ToolDefinition = {
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
         const settings = context.settings;
-        const logPath = normalizePath(`${settings.wikiPath}/log.md`);
+        const idxDir = normalizePath(settings.indexPath || 'WikiIndex');
+        const logPath = normalizePath(`${idxDir}/log.md`);
+
+        // Ensure index directory exists
+        if (!vault.getAbstractFileByPath(idxDir)) {
+            await vault.createFolder(idxDir);
+        }
 
         const timestamp = new Date().toLocaleString('en-US');
         const type = params.type as string;

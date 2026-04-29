@@ -16,6 +16,8 @@ import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
 import { buildRegexFilteredIndex } from '../flows/indexContext';
+import { WikiSearchEngine } from '../search/WikiSearchEngine';
+import { getProviderMetadata } from '../types';
 import { 
     FileSelector, 
     SnippetSelector, 
@@ -88,6 +90,7 @@ export class EnhancedChatView extends ItemView {
     private modelUpdateListener: ((event: Event) => void) | null = null;
     private wikiLinkResolutionCache: Map<string, string | null> = new Map();
     private searchFilesCallCount = 0;
+    private searchEngine: WikiSearchEngine | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
         super(leaf);
@@ -116,6 +119,19 @@ export class EnhancedChatView extends ItemView {
         }
 
         this.loadModels();
+
+        // Initialise BM25 + embedding search engine
+        this.searchEngine = new WikiSearchEngine(this.app, this.plugin.settings);
+        this.searchEngine.build();
+        this.registerEvent(this.app.vault.on('create', f => {
+            if (f instanceof TFile && f.extension === 'md') this.searchEngine?.onFileCreated(f);
+        }));
+        this.registerEvent(this.app.vault.on('delete', f => {
+            if (f instanceof TFile) this.searchEngine?.onFileDeleted(f.path);
+        }));
+        this.registerEvent(this.app.vault.on('modify', f => {
+            if (f instanceof TFile && f.extension === 'md') this.searchEngine?.onFileChanged(f);
+        }));
 
         // Refresh model label/list when settings page updates model configuration.
         this.modelUpdateListener = async () => {
@@ -1245,7 +1261,7 @@ When you need to use tools, please call the corresponding tool functions.`;
             let systemPrompt = this.buildBaseSystemPrompt();
 
             if (relevantIndexContext) {
-                systemPrompt += `\n\n## Regex-Matched Index Blocks\n\n\`\`\`\n${relevantIndexContext}\n\`\`\`\n\nThese blocks were filtered from ${this.plugin.settings.wikiPath}/index.md using regex matches derived from the latest user message. Use them as the first retrieval hint, and read index.md or specific pages with tools when more detail is needed.`;
+                systemPrompt += `\n\n## BM25+Embedding Retrieved Sections\n\n\`\`\`\n${relevantIndexContext}\n\`\`\`\n\nThese sections were retrieved from the wiki using BM25 + embedding rerank. Use them as the primary retrieval context, and read specific pages with tools when more detail is needed.`;
             }
             
             // If there's context, add to system prompt
@@ -1687,15 +1703,61 @@ When you need to use tools, please call the corresponding tool functions.`;
     }
 
     private async getRelevantIndexContext(question: string): Promise<string | null> {
-        const indexPath = `${this.plugin.settings.wikiPath}/index.md`;
-        const indexFile = this.app.vault.getAbstractFileByPath(indexPath);
-
-        if (!(indexFile instanceof TFile)) {
-            return null;
+        // Primary path: BM25 + optional embedding rerank
+        if (this.searchEngine?.isReady()) {
+            try {
+                const top30 = this.searchEngine.search(question, 30);
+                if (top30.length > 0) {
+                    const embedFn = this.buildEmbedFn();
+                    const chunks = await this.searchEngine.rerank(question, top30, embedFn, 10);
+                    if (chunks.length > 0) {
+                        return chunks
+                            .map(c => `### [[${c.path.replace(/\.md$/, '')}|${c.title}]]\n${c.chunk}`)
+                            .join('\n\n---\n\n');
+                    }
+                }
+            } catch (e) {
+                console.warn('[WikiChat] WikiSearchEngine error, falling back to index.md:', e);
+            }
         }
 
+        // Fallback: regex-filtered index.md
+        const indexPath = `${this.plugin.settings.wikiPath}/index.md`;
+        const indexFile = this.app.vault.getAbstractFileByPath(indexPath);
+        if (!(indexFile instanceof TFile)) return null;
         const indexContent = await this.app.vault.read(indexFile);
         return buildRegexFilteredIndex(indexContent, question);
+    }
+
+    private buildEmbedFn(): ((text: string) => Promise<number[]>) | null {
+        const { currentEmbeddingModelId, embeddingModels } = this.plugin.settings;
+        if (!currentEmbeddingModelId) return null;
+        const cfg = embeddingModels?.find(m => m.id === currentEmbeddingModelId);
+        if (!cfg?.baseUrl || !cfg?.modelId) return null;
+        const meta = getProviderMetadata(cfg.provider);
+        if (meta.apiStyle === 'ollama') {
+            return async (text: string) => {
+                const res = await fetch(`${cfg.baseUrl}/api/embed`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: cfg.modelId, input: text }),
+                });
+                const json = await res.json();
+                return json.embeddings?.[0] ?? [];
+            };
+        }
+        // OpenAI-compatible
+        return async (text: string) => {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+            const res = await fetch(`${cfg.baseUrl}/embeddings`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ model: cfg.modelId, input: text }),
+            });
+            const json = await res.json();
+            return json.data?.[0]?.embedding ?? [];
+        };
     }
 
     /**
