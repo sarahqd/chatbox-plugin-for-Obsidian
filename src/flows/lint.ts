@@ -84,12 +84,12 @@ export async function lintWiki(
         );
 
         for (const file of changedFiles) {
-            const content = await app.vault.read(file);
-            const links = content.match(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g) || [];
-            
+            const cache = app.metadataCache.getFileCache(file);
+            const links = cache?.links ?? [];
+
             for (const link of links) {
-                const linkTarget = link.replace(/\[\[|\]\]/g, '').split('|')[0];
-                if (!pageNames.has(linkTarget)) {
+                const linkTarget = link.link.split('#')[0].trim();
+                if (linkTarget && !pageNames.has(linkTarget)) {
                     issues.push({
                         type: 'broken_link',
                         path: file.path,

@@ -1155,16 +1155,24 @@ When you need to use tools, please call the corresponding tool functions.`;
      * - Generate new session ID
      */
     private async newChat() {
+        if (this.isLoading) {
+            this.stopGeneration();
+        }
+
         if (this.historyManager && this.messages.length > 0) {
             await this.historyManager.saveCurrentSession();
         }
         this.messages = [];
         this.contexts = [];
+        if (this.inputEl) {
+            this.inputEl.value = '';
+        }
         this.wikiLinkResolutionCache.clear();
         this.historyManager?.createNewSession();
         this.displayMode = 'chat';
         this.renderCurrentView();
         this.renderContextTags();
+        this.updateTokenDisplay();
         new Notice('New chat created');
     }
 
@@ -1711,7 +1719,9 @@ When you need to use tools, please call the corresponding tool functions.`;
     }
 
     /**
-     * Find file path by exact path, md extension fallback, or basename match.
+     * Find file path using Obsidian's metadataCache, scoped to the wiki directory.
+     * getFirstLinkpathDest() is O(1) — metadataCache maintains its own internal index
+     * and stays in sync with vault changes automatically.
      */
     private findWikiFilePath(linkPath: string): string | null {
         const cacheKey = linkPath.trim().toLowerCase();
@@ -1719,32 +1729,14 @@ When you need to use tools, please call the corresponding tool functions.`;
             return this.wikiLinkResolutionCache.get(cacheKey) || null;
         }
 
-        const direct = this.app.vault.getAbstractFileByPath(linkPath);
-        if (direct instanceof TFile) {
-            this.wikiLinkResolutionCache.set(cacheKey, direct.path);
-            return direct.path;
-        }
+        // Delegate to Obsidian's native wikilink resolver (handles basename, path, aliases).
+        const resolved = this.app.metadataCache.getFirstLinkpathDest(linkPath, '');
+        const wikiPath = this.plugin.settings.wikiPath;
+        const resolvedPath =
+            resolved instanceof TFile && resolved.path.startsWith(wikiPath + '/')
+                ? resolved.path
+                : null;
 
-        if (!linkPath.endsWith('.md')) {
-            const withMd = this.app.vault.getAbstractFileByPath(`${linkPath}.md`);
-            if (withMd instanceof TFile) {
-                this.wikiLinkResolutionCache.set(cacheKey, withMd.path);
-                return withMd.path;
-            }
-        }
-
-        const markdownFiles = this.app.vault.getMarkdownFiles();
-        const normalizedLinkPath = linkPath.toLowerCase();
-        const matched = markdownFiles.find((file) => {
-            const basename = file.basename?.toLowerCase() || file.name.replace(/\.md$/i, '').toLowerCase();
-            return (
-                basename === normalizedLinkPath ||
-                file.path.toLowerCase() === normalizedLinkPath ||
-                file.path.toLowerCase().includes(normalizedLinkPath)
-            );
-        });
-
-        const resolvedPath = matched?.path || null;
         this.wikiLinkResolutionCache.set(cacheKey, resolvedPath);
         return resolvedPath;
     }

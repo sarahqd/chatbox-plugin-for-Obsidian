@@ -6,59 +6,12 @@
 import { App, TFile } from 'obsidian';
 import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '../types';
 import { getLLMClient } from '../llm/client';
-import { executeTool, getOllamaTools } from '../tools';
+import { executeTool, getOllamaTools, getQueryTools } from '../tools';
 import { buildRegexFilteredIndex } from './indexContext';
 
-const SYSTEM_PROMPT = `You are a knowledge base query assistant. Your task is to answer user questions based STRICTLY on the Wiki knowledge base content.
-
-## CRITICAL CONSTRAINT: Knowledge Base Reliance
-**STRICTLY PROHIBITED**: You must NOT use any external knowledge, prior knowledge, or information not present in the Wiki.
-
-**YOU MUST**:
-- Answer ONLY based on content found in Wiki pages
-- Cite every piece of information using [[page-name]] format
-- State clearly if the Wiki does not contain relevant information
-
-**FORBIDDEN**:
-- Using your own knowledge to supplement answers
-- Making inferences beyond what's explicitly stated in Wiki pages
-- Answering questions when the Wiki lacks relevant information
-- Providing information without proper [[page-name]] citations
-
-## Workflow
-1. First read the Wiki index (index.md) to understand the knowledge base structure
-2. Locate candidate Wiki pages based on the question
-3. For each candidate, read frontmatter first (Read_Property), then summary (Read_Summary)
-4. Only when relevance is high, read full content (read_file) or the needed section (Read_Part)
-5. Synthesize answers ONLY from the content you have read
-6. Mark citation sources in the answer using [[page-name]] format
-
-## Retrieval Strategy (MUST FOLLOW)
-- Prioritize cheap reads first: Read_Property -> Read_Summary -> read_file/Read_Part
-- Use read_file only for high-match pages
-- High match means the question intent clearly aligns with title/tags/related and summary keywords
-- If relevance remains low after summary, skip full-text read and continue with other candidates
-
-## Citation Format
-- Every factual statement must be followed by its source: [[page-name]]
-- Multiple sources: [[page-1]] [[page-2]]
-- Example: "Python is a programming language. [[Python]]"
-
-## Answer Guidelines
-- Answers should be accurate and concise
-- MUST cite ALL information sources using [[page-name]] format
-- If Wiki lacks relevant information, respond: "The knowledge base does not contain information about [topic]."
-- Clearly state if information is incomplete or uncertain
-- Use Markdown format
-- Use [[wikilinks]] syntax for related concepts
-
-## Available Tools
-- read_file: Read file contents
-- Read_Property: Read only one frontmatter property
-- Read_Summary: Read only the Summary section
-- Read_Part: Read only one named section
-- search_files: Search file contents
-- list_files: List directory files`;
+// Compact system prompt (~50 tokens) — keeps local model context budget low.
+// Workflow rules are embedded in the user message instead.
+const SYSTEM_PROMPT = `You are a Wiki query assistant. Answer ONLY from content found in the Wiki. Never use external knowledge or make inferences beyond what is explicitly stated. Cite every fact as [[page-name]]. If the Wiki lacks relevant information, state that clearly. Output in Markdown.`;
 
 /**
  * Query the Wiki knowledge base
@@ -88,29 +41,35 @@ export async function queryWiki(
 
         const filteredIndexContent = buildRegexFilteredIndex(indexContent, question);
 
-        // Build initial message
+        // Build initial message — workflow rules are here to keep the system prompt short.
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
-                content: `Please answer the following question:
+                content: `Answer the following question using ONLY the Wiki content.
+
+## Retrieval rules (follow in order)
+1. Screen candidates with Read_Property then Read_Summary before reading full pages.
+2. Call read_file only for pages with high relevance confirmed by summary.
+3. Cite every fact as [[page-name]]. No external knowledge.
+4. If the Wiki lacks the info, say so explicitly.
 
 ## Question
 ${question}
 
-## Regex-Matched Wiki Index Blocks
+## Pre-filtered Wiki Index
 \`\`\`
 ${filteredIndexContent}
 \`\`\`
 
-The index excerpt above was filtered from index.md using regex matches derived from the question. If it is insufficient, read index.md or other Wiki pages with tools before answering.`,
+If the index excerpt is insufficient, use Read_Property or Read_Summary on candidate pages.`,
             },
         ];
 
-        // Run agentic loop
-        const tools = getOllamaTools();
+        // Run agentic loop — limited to 3 iterations and read-only tools for local model efficiency.
+        const tools = getQueryTools();
         let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
         let iterations = 0;
-        const maxIterations = 5;
+        const maxIterations = 3;
         const sources: string[] = [];
 
         while (iterations < maxIterations) {

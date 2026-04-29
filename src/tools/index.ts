@@ -44,6 +44,25 @@ export function getOllamaTools(): OllamaTool[] {
 }
 
 /**
+ * Read-only tools for the query flow.
+ * Excludes all write/create/update tools to minimise token usage with local models.
+ */
+const QUERY_TOOL_NAMES = new Set(['read_file', 'Read_Summary', 'Read_Property', 'Read_Part']);
+
+export function getQueryTools(): OllamaTool[] {
+    return allTools
+        .filter((tool) => QUERY_TOOL_NAMES.has(tool.name))
+        .map((tool) => ({
+            type: 'function' as const,
+            function: {
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+            },
+        }));
+}
+
+/**
  * Execute a tool by name
  */
 export async function executeTool(
