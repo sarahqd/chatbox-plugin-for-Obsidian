@@ -1303,11 +1303,13 @@ When you need to use tools, please call the corresponding tool functions.`;
             // Get tool definitions
             const tools = getOllamaTools();
             
-            // Tool call loop — capped at 2 for local models (gemma4 etc.).
-            // Each LLM call on a 4B local model takes ~15-30s; 2 calls fits in 1 min.
-            let maxIterations = 3; // Prevent infinite loop and timeout on local models
+            // Check if current model supports tool calls
+            let useTools = currentModelConfig?.supportsTools ?? true; // Read from model config, default true
+            
+            // Tool call loop — prevent infinite loops with a reasonable upper bound
+            // Can be configured per model or use a sensible default
+            const maxIterations = currentModelConfig?.maxToolIterations ?? 100; // Configurable, default to 5
             let iteration = 0;
-            let useTools = true; // Whether to use tools
             
             while (iteration < maxIterations) {
                 iteration++;

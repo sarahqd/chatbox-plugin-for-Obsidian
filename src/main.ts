@@ -536,7 +536,7 @@ export default class LLMWikiPlugin extends Plugin {
                 new Notice('Starting Wiki maintenance check...');
             }
 
-            const result = await lintWiki(this.app, this.settings, false, (msg) => {
+            const result = await lintWiki(this.app, this.settings, true, (msg) => {
                 console.log('Lint:', msg);
             });
 

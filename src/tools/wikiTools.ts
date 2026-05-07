@@ -1032,6 +1032,26 @@ export const updateIndexTool: ToolDefinition = {
                 sliceFileNames.push('undated.md');
             }
 
+            // Remove stale slice files that are no longer generated in this rebuild.
+            const keepSliceNames = new Set(sliceFileNames);
+            const staleSliceFiles = (vault.getMarkdownFiles() as TFile[]).filter((file) => {
+                if (!file.path.startsWith(idxDir + '/')) {
+                    return false;
+                }
+
+                const isMonthlySlice = /^\d{4}-\d{2}\.md$/.test(file.name);
+                const isUndatedSlice = file.name === 'undated.md';
+                if (!isMonthlySlice && !isUndatedSlice) {
+                    return false;
+                }
+
+                return !keepSliceNames.has(file.name);
+            });
+
+            for (const staleFile of staleSliceFiles) {
+                await vault.delete(staleFile);
+            }
+
             // ── Write idxDir/index.md as TOC of all slice files ──
             const tocPath = normalizePath(`${idxDir}/index.md`);
             let tocContent = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n`;

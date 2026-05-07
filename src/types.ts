@@ -179,6 +179,7 @@ export interface ModelConfig {
     isDefault?: boolean;
     supportsTools?: boolean;
     supportsVision?: boolean;
+    maxToolIterations?: number; // Maximum tool call iterations (default 5)
 }
 
 export interface EmbeddingModelConfig {
