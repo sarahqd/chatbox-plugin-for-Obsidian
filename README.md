@@ -14,43 +14,75 @@
 
 ---
 
-## Overview
+## The Problem
 
-WikiChat is an Obsidian plugin that transforms your notes into an intelligent, self-maintaining knowledge base. Powered by local LLMs or cloud LLM API, it helps you ingest, query, and maintain your Wiki with minimal effort.
+As you accumulate notes, research materials, and documentation, they often remain fragmented:
+
+- **Scattered content**: Markdown files, PDFs, snippets, and web clips scattered across different folders and formats
+- **Information silos**: Related concepts exist in your notes but lack connections
+- **Format inconsistency**: Content from different sources (web, emails, documents) lacks unified structure
+- **Privacy concerns**: Using cloud AI services means uploading personal notes to third-party servers
+- **Recurring costs**: Subscriptions add up when relying on commercial LLM APIs
+
+## The Solution
+
+WikiChat automates the process of **normalizing and connecting** your personal knowledge base. Using local LLMs running on your machine, it:
+
+- Automatically extracts key concepts and entities from documents
+- Establishes bidirectional links between related pages
+- Standardizes all content into a consistent Wiki page structure
+- Stores knowledge directly as Markdown files in your vault (no external database)
+- Keeps everything on your computer—complete privacy, zero cloud dependency
 
 **Inspiration**: This project is inspired by [Andrej Karpathy's LLM Wiki concept](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f#file-llm-wiki-md).
 
-## Features
+## Key Features
 
-### 📥 Ingest
-- Automatically analyze and integrate new documents into your Wiki
-- Extract entities, concepts, and relationships
-- Create and update Wiki pages with proper structure
-- Establish bidirectional links between related pages
+### 📥 Ingest & Normalize
+- Automatically analyze new documents and extract key information
+- Convert mixed formats into standardized Wiki pages
+- Identify entities, concepts, and relationships
+- Create bidirectional links between related topics
 
-### 🔍 Query
-- Ask questions in natural language
-- Get answers synthesized from multiple Wiki pages
+### 🔍 Query & Discover
+- Search your knowledge base using natural language
+- Get synthesized answers drawing from multiple pages
 - Source citations with `[[wikilink]]` references
-- Context-aware responses based on your knowledge base
+- Uncover connections you didn't notice before
 
-### 🔧 Maintain
-- Detect broken links and orphaned pages
-- Identify content contradictions
-- Find duplicate content
-- Mark stale pages for review
-- Auto-fix suggestions with user confirmation
+### 🔧 Maintain Quality
+- Detect broken links and disconnected pages
+- Identify contradictions and duplicate content
+- Mark pages that need updating
+- Receive auto-fix suggestions
 
-## Notebook Structure
+### 🔐 Privacy & Cost
+- **All processing runs locally** — your data never leaves your computer
+- **Use free, open-source models** — no API subscriptions required
+- **Offline capable** — works without internet connection
+- **Your data, your rules** — complete control over your knowledge base
 
-WikiChat organizes your vault into three main areas:
+## Who Uses WikiChat?
+
+### Students & Researchers
+Organize lecture notes, papers, and research materials into a structured knowledge base. Quickly find related concepts and references across semesters of accumulated content.
+
+### Engineers & Technical Writers
+Manage code snippets, technical documentation, solutions, and best practices. Discover connections between different problems and approaches you've encountered.
+
+### Content Creators & Writers
+Consolidate inspiration, references, and source material. Rapidly locate related ideas and maintain a searchable archive of your creative work.
+
+## Vault Structure
+
+WikiChat organizes your Obsidian vault into three areas:
 
 ```
 your-vault/
-├── Sources/       # Original documents and imported content
+├── Sources/       # Original documents you want to process
 ├── templates/     # Wiki page templates
-└── Wiki/          # Structured knowledge base pages
-    └── index.md   # Auto-generated index of all Wiki pages
+└── Wiki/          # Structured knowledge base (auto-generated)
+    └── index.md   # Index of all pages
 ```
 
 ## Installation
@@ -86,56 +118,41 @@ cp styles.css WikiChat/
 cp -r WikiChat /path/to/your/vault/.obsidian/plugins/
 ```
 
-## Usage
+## Getting Started
 
 ### Basic Workflow
 
-1. **Ingest Documents**: Add documents to your `Sources/` folder
-2. **Process with WikiChat**: Use the plugin to analyze and create Wiki pages
-3. **Query Knowledge**: Ask questions and get AI-powered answers
-4. **Maintain Quality**: Run lint checks to keep your Wiki healthy
+1. **Prepare documents**: Move markdown files to your `Sources/` folder (see format notes below)
+2. **Ingest**: Run the `WikiChat: Ingest` command to analyze and normalize
+3. **Query**: Use `WikiChat: Query` to ask questions about your knowledge base
+4. **Maintain**: Periodically run `WikiChat: Lint` to check for issues
 
-### Commands
+### Supported Formats
 
-| Command | Description |
-|---------|-------------|
-| `WikiChat: Ingest` | Process and integrate new documents |
-| `WikiChat: Query` | Open the query interface |
-| `WikiChat: Lint` | Run maintenance checks |
-| `WikiChat: Open Chat` | Open the AI chat interface |
+- **✅ Markdown** - Native support, formatting preserved
+- **Other formats** (PDF, Word, web articles): Convert to Markdown first using tools like Pandoc or online converters, then place in `Sources/` folder
+
+### Storage Model
+
+- **Markdown-only knowledge base**: WikiChat manages content as Markdown files in your Obsidian vault
+- **No external database**: There is no additional DB layer to maintain or migrate
 
 ### Section-Aware Tooling
 
 When the model only needs one part of a Wiki page, prefer the narrowest tool instead of reading or rewriting the full page.
 
-- Use `Read_Summary` when the user asks for the abstract, overview, or short description.
-- Use `Read_Property` when the user asks for frontmatter only, such as `title`, `tags`, `related`, or timestamps.
-- Use `Read_Part` when the user asks for one named section like `Content`, `Related Links`, `Timeline`, or another heading.
-- Use `Update_Content` when the user wants to rewrite only the main body under `## Content` and keep summary, frontmatter, and other sections unchanged.
-- Use `Update_Part` when the user wants to edit one non-Content section by heading name.
-
-Example prompts:
-
-```text
-Read the "Related Links" section of Wiki/Database_Design.md.
-```
-
-Expected tool choice: `Read_Part` with `part: "Related Links"`
-
-```text
-Rewrite only the Content section of Wiki/Python.md using the notes below, but keep the summary and metadata unchanged.
-```
-
-Expected tool choice: `Update_Content`
+For local inference, choose a model/runtime that supports **tool (function) calling**, so WikiChat can run file search and file editing workflows reliably.
 
 ## LLM Support
 
-WikiChat supports multiple LLM backends:
+WikiChat is designed for local, privacy-first operation:
 
-| Provider | Status | Notes |
-|----------|--------|-------|
-| **Ollama** | ✅ Supported | Recommended for local, private AI |
-| **OpenAI Compatible** | ✅ Supported |  |
+| Provider | Status | Best For | Requirement |
+|----------|--------|----------|-------------|
+| **Ollama** | ✅ Recommended | Local models, complete privacy, zero cost | Model must support tool/function calling |
+| **OpenAI Compatible** | ✅ Available | When you prefer cloud-based models | Tool/function calling strongly recommended |
+
+> Note: For local models, tool/function calling is required for file-level operations such as searching and updating Wiki files.
 
 ### Configuring Ollama
 
@@ -172,13 +189,12 @@ WikiChat creates pages following this structure:
 title: Page Title
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
+summary: Summary
 tags: [tag1, tag2]
+related: [Page1, Page2]
 ---
 
 # Page Title
-
-## Summary
-<!-- Brief summary, max 200 characters -->
 
 ## Content
 <!-- Main content with proper formatting -->
@@ -194,7 +210,7 @@ tags: [tag1, tag2]
 |---------|-------------|---------|
 | `llmProvider` | LLM backend to use | `ollama` |
 | `ollamaEndpoint` | Ollama server URL | `http://localhost:11434` |
-| `modelName` | Model to use | `llama2` |
+| `modelName` | Model to use | `gemma4:E4b` |
 | `wikiFolder` | Wiki storage folder | `Wiki` |
 | `sourcesFolder` | Sources folder | `Sources` |
 
@@ -207,16 +223,6 @@ npm run dev
 # Production build
 npm run build
 ```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## License
 
