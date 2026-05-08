@@ -35,6 +35,8 @@ When in doubt, omit content rather than add external information.
 
 ## Wiki Page Standards
 - Each page must have YAML frontmatter
+- Put metadata fields (title, summary, tags, related, created, updated) in frontmatter only
+- Do not duplicate metadata sections in body content (no extra # Title, ## Summary, ## Related Links, or ## Tags blocks unless explicitly requested)
 - Use [[wikilinks]] syntax to connect related concepts
 - Keep content concise and structured
 - Provide a brief summary for each page

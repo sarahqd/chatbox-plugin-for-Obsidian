@@ -8,14 +8,13 @@
  * - Section 3: Input section fixed at bottom, about 1/5 height
  */
 
-import { ItemView, WorkspaceLeaf, Notice, TFile } from 'obsidian';
+import { App, ItemView, WorkspaceLeaf, Notice, TFile, Modal } from 'obsidian';
 import './styles.css';
 import type { LLMWikiSettings, ChatMessage, ChatContext, OllamaMessage, OllamaToolCall, ModelConfig, FileReference } from '../types';
 import { ContextManager, estimateTokens, getAvailableContextSources } from '../context/ContextManager';
 import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
-import { buildRegexFilteredIndex } from '../flows/indexContext';
 import { WikiSearchEngine } from '../search/WikiSearchEngine';
 import { getProviderMetadata } from '../types';
 import { 
@@ -28,13 +27,23 @@ import {
     parseFileReferences,
     createInternalLink
 } from '../context/FileSelector';
+import type { SearchIndexStatus } from '../types';
 
 const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
+const WELCOME_MESSAGE = 'Hello! I am the WikiChat assistant. I can help you:\n\n- **Ingest** new documents into Wiki\n- **Query** the Wiki knowledge base\n- **Maintain** Wiki content\n\nPlease enter your question or command.';
 
 type DisplayMode = 'chat' | 'history';
 
 const SEARCH_FILES_CALL_BUDGET = 2;
 const SEARCH_FILES_DEFAULT_MAX_RESULTS = 30;
+
+interface ChatViewPluginApi {
+    settings: LLMWikiSettings;
+    saveSettings: () => Promise<void>;
+    searchEngine: WikiSearchEngine;
+    getSearchIndexStatus: () => SearchIndexStatus;
+    getSearchIndexStatusMessage: () => string;
+}
 
 // Tool call data structure for rendering
 interface ToolCallDisplay {
@@ -49,8 +58,37 @@ interface ToolCallDisplay {
     expanded: boolean;
 }
 
+class ConfirmClearHistoryModal extends Modal {
+    private readonly onConfirm: () => void;
+
+    constructor(app: App, onConfirm: () => void) {
+        super(app);
+        this.onConfirm = onConfirm;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Clear all chat history?' });
+        contentEl.createEl('p', { text: 'This action cannot be undone.' });
+
+        const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+        buttonContainer.createEl('button', { text: 'Cancel', cls: 'modal-cancel-btn' })
+            .onClickEvent(() => this.close());
+        buttonContainer.createEl('button', { text: 'Clear All', cls: 'modal-save-btn' })
+            .onClickEvent(() => {
+                this.onConfirm();
+                this.close();
+            });
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 export class EnhancedChatView extends ItemView {
-    private plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> };
+    private plugin: ChatViewPluginApi;
     private messages: ChatMessage[] = [];
     
     // UI Elements
@@ -92,7 +130,7 @@ export class EnhancedChatView extends ItemView {
     private searchFilesCallCount = 0;
     private searchEngine: WikiSearchEngine | null = null;
 
-    constructor(leaf: WorkspaceLeaf, plugin: { settings: LLMWikiSettings; saveSettings: () => Promise<void> }) {
+    constructor(leaf: WorkspaceLeaf, plugin: ChatViewPluginApi) {
         super(leaf);
         this.plugin = plugin;
         this.currentModel = plugin.settings.models.find((model) => model.id === plugin.settings.currentModelId)?.name || '';
@@ -115,23 +153,11 @@ export class EnhancedChatView extends ItemView {
         this.render();
 
         if (this.messages.length === 0) {
-            this.addMessage('assistant', 'Hello! I am the WikiChat assistant. I can help you:\n\n- **Ingest** new documents into Wiki\n- **Query** the Wiki knowledge base\n- **Maintain** Wiki content\n\nPlease enter your question or command.');
+            this.addWelcomeMessage();
         }
-
         this.loadModels();
 
-        // Initialise BM25 + embedding search engine
-        this.searchEngine = new WikiSearchEngine(this.app, this.plugin.settings);
-        this.searchEngine.build();
-        this.registerEvent(this.app.vault.on('create', f => {
-            if (f instanceof TFile && f.extension === 'md') this.searchEngine?.onFileCreated(f);
-        }));
-        this.registerEvent(this.app.vault.on('delete', f => {
-            if (f instanceof TFile) this.searchEngine?.onFileDeleted(f.path);
-        }));
-        this.registerEvent(this.app.vault.on('modify', f => {
-            if (f instanceof TFile && f.extension === 'md') this.searchEngine?.onFileChanged(f);
-        }));
+        this.searchEngine = this.plugin.searchEngine;
 
         // Refresh model label/list when settings page updates model configuration.
         this.modelUpdateListener = async () => {
@@ -577,10 +603,13 @@ export class EnhancedChatView extends ItemView {
         if (!this.historyListEl) return;
         this.historyListEl.empty();
 
-        // Close button
+        // Action buttons
         const title = this.historyListEl.createDiv({ cls: 'history-title-bar' });
         title.createSpan({ text: 'Chat History' });
-        title.createEl('button', { text: '✕ Close', cls: 'close-btn' })
+        const titleActions = title.createDiv({ cls: 'history-title-actions' });
+        titleActions.createEl('button', { text: '🗑 Clear All', cls: 'clear-all-btn' })
+            .onClickEvent(async () => this.clearAllChats());
+        titleActions.createEl('button', { text: '✕ Close', cls: 'close-btn' })
             .onClickEvent(() => this.toggleDisplayMode('chat'));
 
         // History list
@@ -613,6 +642,50 @@ export class EnhancedChatView extends ItemView {
                 const empty = list.createDiv({ cls: 'empty-message' });
                 empty.setText('No chat history');
             }
+        });
+    }
+
+    private async clearAllChats() {
+        if (!this.historyManager) return;
+
+        const shouldClear = await this.confirmClearAllChats();
+        if (!shouldClear) {
+            return;
+        }
+
+        const success = await this.historyManager.clearAllHistory();
+        if (!success) {
+            new Notice('Failed to clear chat history');
+            return;
+        }
+
+        this.messages = [];
+        this.contexts = [];
+        this.wikiLinkResolutionCache.clear();
+        this.historyManager.createNewSession();
+        this.addWelcomeMessage();
+        this.renderHistoryList();
+        this.renderContextTags();
+        this.updateTokenDisplay();
+        new Notice('All chat history cleared');
+    }
+
+    private confirmClearAllChats(): Promise<boolean> {
+        return new Promise((resolve) => {
+            let confirmed = false;
+            const modal = new ConfirmClearHistoryModal(this.app, () => {
+                confirmed = true;
+                resolve(true);
+            });
+
+            modal.onClose = () => {
+                modal.contentEl.empty();
+                if (!confirmed) {
+                    resolve(false);
+                }
+            };
+
+            modal.open();
         });
     }
 
@@ -1185,11 +1258,16 @@ When you need to use tools, please call the corresponding tool functions.`;
         }
         this.wikiLinkResolutionCache.clear();
         this.historyManager?.createNewSession();
+        this.addWelcomeMessage();
         this.displayMode = 'chat';
         this.renderCurrentView();
         this.renderContextTags();
         this.updateTokenDisplay();
         new Notice('New chat created');
+    }
+
+    private addWelcomeMessage() {
+        this.addMessage('assistant', WELCOME_MESSAGE);
     }
 
     /**
@@ -1723,6 +1801,10 @@ When you need to use tools, please call the corresponding tool functions.`;
 
     private async getRelevantIndexContext(question: string): Promise<string | null> {
         // Primary path: BM25 + optional embedding rerank
+        if (this.plugin.getSearchIndexStatus() !== 'ready') {
+            return this.plugin.getSearchIndexStatusMessage();
+        }
+
         if (this.searchEngine?.isReady()) {
             try {
                 const top30 = this.searchEngine.search(question, 30);
@@ -1736,16 +1818,11 @@ When you need to use tools, please call the corresponding tool functions.`;
                     }
                 }
             } catch (e) {
-                console.warn('[WikiChat] WikiSearchEngine error, falling back to index.md:', e);
+                console.warn('[WikiChat] WikiSearchEngine error while preparing retrieval context:', e);
             }
         }
 
-        // Fallback: regex-filtered index.md
-        const indexPath = `${this.plugin.settings.wikiPath}/index.md`;
-        const indexFile = this.app.vault.getAbstractFileByPath(indexPath);
-        if (!(indexFile instanceof TFile)) return null;
-        const indexContent = await this.app.vault.read(indexFile);
-        return buildRegexFilteredIndex(indexContent, question);
+        return null;
     }
 
     private buildEmbedFn(): ((text: string) => Promise<number[]>) | null {

@@ -4,18 +4,29 @@
  */
 
 import { App, TFile } from 'obsidian';
-import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult } from '../types';
+import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult, SearchIndexStatus } from '../types';
 import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools, getQueryTools } from '../tools';
-import { buildRegexFilteredIndex } from './indexContext';
 import type { WikiSearchEngine } from '../search/WikiSearchEngine';
 
 // Maximum characters per tool result is computed dynamically from the active model's
-// context window â€” see maxToolResultChars inside queryWiki().
+// context window â€?see maxToolResultChars inside queryWiki().
 
-// Compact system prompt (~50 tokens) â€” keeps local model context budget low.
+// Compact system prompt (~50 tokens) â€?keeps local model context budget low.
 // Workflow rules are embedded in the user message instead.
 const SYSTEM_PROMPT = `You are a Wiki query assistant. Answer ONLY from content found in the Wiki. Never use external knowledge or make inferences beyond what is explicitly stated. Cite every fact as [[page-name]]. If the Wiki lacks relevant information, state that clearly. Output in Markdown.`;
+
+function getDegradedRetrievalContext(status: SearchIndexStatus): string {
+    if (status === 'building') {
+        return 'Search index is rebuilding; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+    }
+
+    if (status === 'error') {
+        return 'Search index is unavailable; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+    }
+
+    return 'Search index is not ready yet; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+}
 
 /**
  * Build a compact context block from BM25 search results.
@@ -73,14 +84,15 @@ async function buildBM25Context(
  *
  * @param searchEngine  Optional pre-built WikiSearchEngine (BM25 in-memory index).
  *                      When provided, replaces the slow index.md full-file read with
- *                      an O(1) in-memory BM25 search â€” critical for 10k+ document wikis.
+ *                      an O(1) in-memory BM25 search â€?critical for 10k+ document wikis.
  */
 export async function queryWiki(
     app: App,
     settings: LLMWikiSettings,
     question: string,
     onChunk?: (text: string) => void,
-    searchEngine?: WikiSearchEngine
+    searchEngine?: WikiSearchEngine,
+    searchIndexStatus: SearchIndexStatus = searchEngine?.isReady() ? 'ready' : 'idle'
 ): Promise<QueryResult> {
     const client = getLLMClient(settings);
     const context: ToolContext = {
@@ -99,32 +111,10 @@ export async function queryWiki(
             retrievalContext = contextText;
             preFetchedSources = sources;
         } else {
-            // Fallback: read index.md (TOC of slice files) from the dedicated index directory,
-            // then read every slice file it references and concatenate before filtering.
-            const idxDir = settings.indexPath || 'WikiIndex';
-            const tocFile = app.vault.getAbstractFileByPath(`${idxDir}/index.md`);
-            let combinedContent = '';
-            if (tocFile instanceof TFile) {
-                const tocContent = await app.vault.read(tocFile);
-                // Extract wikilink targets: [[idxDir/YYYY-MM|label]] â†’ "idxDir/YYYY-MM"
-                const linkRe = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
-                let m: RegExpExecArray | null;
-                const sliceReads: Promise<string>[] = [];
-                while ((m = linkRe.exec(tocContent)) !== null) {
-                    const target = m[1].trim();
-                    const slicePath = target.endsWith('.md') ? target : `${target}.md`;
-                    const sliceFile = app.vault.getAbstractFileByPath(slicePath);
-                    if (sliceFile instanceof TFile) {
-                        sliceReads.push(app.vault.read(sliceFile));
-                    }
-                }
-                const sliceContents = await Promise.all(sliceReads);
-                combinedContent = sliceContents.join('\n\n');
-            }
-            retrievalContext = buildRegexFilteredIndex(combinedContent, question);
+            retrievalContext = getDegradedRetrievalContext(searchIndexStatus);
         }
 
-        // Build initial message â€” workflow rules are here to keep the system prompt short.
+        // Build initial message â€?workflow rules are here to keep the system prompt short.
         const messages: OllamaMessage[] = [
             {
                 role: 'user',
@@ -140,7 +130,7 @@ ${retrievalContext}`,
             },
         ];
 
-        // Run agentic loop â€” capped at 2 iterations for local model budget.
+        // Run agentic loop â€?capped at 2 iterations for local model budget.
         // Most queries answer in 0 tool calls when BM25 context is pre-loaded.
         // Compute per-call tool result budget from current model's context window.
         const activeModel = settings.models.find(m => m.id === settings.currentModelId);
@@ -163,7 +153,7 @@ ${retrievalContext}`,
                     toolCalls: response.toolCalls,
                 });
 
-                // Execute all tool calls in parallel â€” all query tools are read-only.
+                // Execute all tool calls in parallel â€?all query tools are read-only.
                 const toolResults = await Promise.all(
                     response.toolCalls.map(tc =>
                         executeTool(tc.function.name, tc.function.arguments, context)
@@ -190,7 +180,7 @@ ${retrievalContext}`,
                     // Truncate large tool results to prevent context overflow on small models.
                     let resultStr = JSON.stringify(result);
                     if (resultStr.length > maxToolResultChars) {
-                        const truncated = { ...result, data: resultStr.slice(0, maxToolResultChars) + 'â€¦(truncated)' };
+                        const truncated = { ...result, data: resultStr.slice(0, maxToolResultChars) + 'â€?truncated)' };
                         resultStr = JSON.stringify(truncated);
                     }
 
@@ -286,7 +276,7 @@ export async function chatWiki(
                     const toolCall = response.toolCalls[i];
                     let resultStr = JSON.stringify(toolResults[i]);
                     if (resultStr.length > maxToolResultChars) {
-                        const truncated = { ...toolResults[i], data: resultStr.slice(0, maxToolResultChars) + 'â€¦(truncated)' };
+                        const truncated = { ...toolResults[i], data: resultStr.slice(0, maxToolResultChars) + 'â€?truncated)' };
                         resultStr = JSON.stringify(truncated);
                     }
                     messages.push({

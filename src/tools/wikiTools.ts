@@ -3,6 +3,7 @@
  * Tools for creating, updating, and maintaining Wiki pages
  */
 
+import type { App } from 'obsidian';
 import type { ToolDefinition, ToolContext, ToolResult, WikiPageFrontmatter } from '../types';
 import { TFile, normalizePath } from 'obsidian';
 
@@ -231,6 +232,123 @@ function replaceSectionContent(body: string, heading: string, newContent: string
     return body.slice(0, section.bodyStart) + replacement + body.slice(section.end);
 }
 
+interface ExtractedIngestMetadata {
+    title?: string;
+    summary?: string;
+    tags: string[];
+    related: string[];
+    content: string;
+}
+
+function parseSectionListItems(sectionContent: string): string[] {
+    const items: string[] = [];
+    const lines = sectionContent.split(/\r?\n/);
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+            continue;
+        }
+
+        const listMatch = line.match(/^[-*]\s+(.+)$/);
+        if (listMatch) {
+            items.push(listMatch[1].trim());
+            continue;
+        }
+
+        if (line.includes(',')) {
+            line.split(',').map((part) => part.trim()).filter(Boolean).forEach((part) => items.push(part));
+            continue;
+        }
+
+        items.push(line);
+    }
+
+    return items;
+}
+
+function parseRelatedCandidates(sectionContent: string): string[] {
+    const wikilinks = Array.from(sectionContent.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g))
+        .map((match) => match[0].trim())
+        .filter(Boolean);
+
+    if (wikilinks.length > 0) {
+        return wikilinks;
+    }
+
+    return parseSectionListItems(sectionContent);
+}
+
+function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMetadata {
+    let workingBody = rawContent.trim();
+    let extractedTitle: string | undefined;
+    let extractedSummary: string | undefined;
+    let extractedTags: string[] = [];
+    let extractedRelated: string[] = [];
+
+    const parsed = parseFrontmatter(workingBody);
+    if (parsed.frontmatter) {
+        extractedTitle = parsed.frontmatter.title || undefined;
+        extractedSummary = parsed.frontmatter.summary || undefined;
+        extractedTags = [...parsed.frontmatter.tags];
+        extractedRelated = [...parsed.frontmatter.related];
+        workingBody = parsed.body.trim();
+    }
+
+    const h1Match = workingBody.match(/^#\s+(.+?)\s*(?:\r?\n){1,2}/);
+    if (h1Match) {
+        extractedTitle = extractedTitle || h1Match[1].trim();
+        workingBody = workingBody.slice(h1Match[0].length).trim();
+    }
+
+    const summarySection = findSection(workingBody, 'Summary');
+    if (summarySection) {
+        extractedSummary = extractedSummary || summarySection.content.replace(/\s+/g, ' ').trim();
+        workingBody = replaceSectionContent(workingBody, 'Summary', '')?.trim() || workingBody;
+    }
+
+    const tagsSection = findSection(workingBody, 'Tags');
+    if (tagsSection) {
+        if (extractedTags.length === 0) {
+            extractedTags = parseSectionListItems(tagsSection.content);
+        }
+        workingBody = replaceSectionContent(workingBody, 'Tags', '')?.trim() || workingBody;
+    }
+
+    const relatedLinksSection = findSection(workingBody, 'Related Links');
+    if (relatedLinksSection) {
+        if (extractedRelated.length === 0) {
+            extractedRelated = parseRelatedCandidates(relatedLinksSection.content);
+        }
+        workingBody = replaceSectionContent(workingBody, 'Related Links', '')?.trim() || workingBody;
+    }
+
+    const relatedSection = findSection(workingBody, 'Related');
+    if (relatedSection) {
+        if (extractedRelated.length === 0) {
+            extractedRelated = parseRelatedCandidates(relatedSection.content);
+        }
+        workingBody = replaceSectionContent(workingBody, 'Related', '')?.trim() || workingBody;
+    }
+
+    const contentSection = findSection(workingBody, 'Content');
+    if (contentSection) {
+        workingBody = contentSection.content.trim();
+    }
+
+    return {
+        title: extractedTitle,
+        summary: extractedSummary,
+        tags: extractedTags,
+        related: extractedRelated,
+        content: workingBody.trim(),
+    };
+}
+
+function formatWikiBodyFromMainContent(mainContent: string): string {
+    const normalized = mainContent.trim();
+    return `## Content\n\n${normalized}\n`;
+}
+
 async function readWikiPage(
     vault: any,
     path: string
@@ -257,6 +375,235 @@ async function saveWikiPage(vault: any, file: TFile, frontmatter: WikiPageFrontm
 
 function touchUpdated(frontmatter: WikiPageFrontmatter): void {
     frontmatter.updated = new Date().toISOString().split('T')[0];
+}
+
+interface GeneratedIndexPage {
+    title: string;
+    path: string;
+    tags: string[];
+    created: string;
+    updated: string;
+}
+
+interface GeneratedIndexResult {
+    pageCount: number;
+    slices: number;
+}
+
+interface RebuildGeneratedIndexOptions {
+    pageYieldBatchSize?: number;
+    onProgress?: (message: string) => void;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+    if (Array.isArray(value)) {
+        return value.map((item) => String(item).trim()).filter(Boolean);
+    }
+
+    if (typeof value === 'string') {
+        return value
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean);
+    }
+
+    return [];
+}
+
+function getMetadataPage(file: TFile, cacheFrontmatter: Record<string, unknown> | null | undefined): GeneratedIndexPage | null {
+    if (!cacheFrontmatter) {
+        return null;
+    }
+
+    return {
+        title: typeof cacheFrontmatter.title === 'string' && cacheFrontmatter.title.trim()
+            ? cacheFrontmatter.title.trim()
+            : file.basename,
+        path: file.path,
+        tags: normalizeStringArray(cacheFrontmatter.tags),
+        created: typeof cacheFrontmatter.created === 'string' ? cacheFrontmatter.created.trim() : '',
+        updated: typeof cacheFrontmatter.updated === 'string' ? cacheFrontmatter.updated.trim() : '',
+    };
+}
+
+async function collectGeneratedIndexPages(
+    app: App,
+    vault: any,
+    wikiPath: string,
+    pageYieldBatchSize: number,
+    onProgress?: (message: string) => void
+): Promise<GeneratedIndexPage[]> {
+    const pages: GeneratedIndexPage[] = [];
+    const files = (vault.getMarkdownFiles() as TFile[]).filter((file) => file.path.startsWith(wikiPath + '/'));
+
+    for (let start = 0; start < files.length; start += pageYieldBatchSize) {
+        const batch = files.slice(start, start + pageYieldBatchSize);
+
+        for (const file of batch) {
+            const cache = app.metadataCache.getFileCache(file);
+            const metadataPage = getMetadataPage(file, cache?.frontmatter as Record<string, unknown> | null | undefined);
+            if (metadataPage) {
+                pages.push(metadataPage);
+                continue;
+            }
+
+            const content = await vault.read(file);
+            const { frontmatter } = parseFrontmatter(content);
+            pages.push({
+                title: frontmatter?.title || file.basename,
+                path: file.path,
+                tags: frontmatter?.tags || [],
+                created: frontmatter?.created || '',
+                updated: frontmatter?.updated || '',
+            });
+        }
+
+        onProgress?.(`Collected ${Math.min(start + batch.length, files.length)}/${files.length} wiki pages`);
+        await yieldToUi();
+    }
+
+    return pages;
+}
+
+async function writeSliceFile(vault: any, path: string, content: string): Promise<void> {
+    const existing = vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+        await vault.modify(existing, content);
+        return;
+    }
+
+    await vault.create(path, content);
+}
+
+export async function rebuildGeneratedWikiIndex(
+    app: App,
+    settings: ToolContext['settings'],
+    options: RebuildGeneratedIndexOptions = {}
+): Promise<GeneratedIndexResult> {
+    const vault = app.vault as any;
+    const idxDir = normalizePath(settings.indexPath || 'WikiIndex');
+    const pageYieldBatchSize = options.pageYieldBatchSize ?? 100;
+
+    if (!vault.getAbstractFileByPath(idxDir)) {
+        await vault.createFolder(idxDir);
+    }
+
+    const pages = await collectGeneratedIndexPages(
+        app,
+        vault,
+        settings.wikiPath,
+        pageYieldBatchSize,
+        options.onProgress
+    );
+
+    const now = new Date();
+    const lastUpdated = now.toISOString().split('T')[0] + ' ' + now.toTimeString().split(' ')[0];
+    const grouped: Record<string, GeneratedIndexPage[]> = {};
+    const noDate: GeneratedIndexPage[] = [];
+
+    for (const page of pages) {
+        const dateStr = page.created || page.updated;
+        const monthMatch = dateStr.match(/^(\d{4}-\d{2})/);
+        if (monthMatch) {
+            const ym = monthMatch[1];
+            if (!grouped[ym]) {
+                grouped[ym] = [];
+            }
+            grouped[ym].push(page);
+        } else {
+            noDate.push(page);
+        }
+    }
+
+    const sliceKeys = Object.keys(grouped).sort((left, right) => right.localeCompare(left));
+    const sliceFileNames: string[] = [];
+
+    for (const ym of sliceKeys) {
+        const monthPages = grouped[ym].sort((left, right) => {
+            const leftDate = left.created || left.updated || '';
+            const rightDate = right.created || right.updated || '';
+            if (leftDate !== rightDate) {
+                return rightDate.localeCompare(leftDate);
+            }
+            return left.title.localeCompare(right.title);
+        });
+
+        let sliceContent = `# Wiki Pages - ${ym}\n\n_Auto-generated. For reading only, not searched._\n\n`;
+        for (let index = 0; index < monthPages.length; index++) {
+            const page = monthPages[index];
+            const dateStr = page.created || page.updated;
+            const dateDisplay = dateStr ? ` _(${dateStr})_` : '';
+            const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
+            sliceContent += `- ${pathToWikilinkWithAlias(page.path, page.title)}${dateDisplay}${tagStr}\n`;
+
+            if ((index + 1) % pageYieldBatchSize === 0) {
+                await yieldToUi();
+            }
+        }
+
+        const sliceFileName = `${ym}.md`;
+        sliceFileNames.push(sliceFileName);
+        await writeSliceFile(vault, normalizePath(`${idxDir}/${sliceFileName}`), sliceContent);
+        options.onProgress?.(`Wrote index slice ${sliceFileName}`);
+        await yieldToUi();
+    }
+
+    if (noDate.length > 0) {
+        let undatedContent = '# Wiki Pages - Undated\n\n_Auto-generated. For reading only, not searched._\n\n';
+        for (let index = 0; index < noDate.length; index++) {
+            const page = noDate[index];
+            const tagStr = page.tags.length > 0 ? ` **[${page.tags.join(', ')}]**` : '';
+            undatedContent += `- ${pathToWikilinkWithAlias(page.path, page.title)}${tagStr}\n`;
+
+            if ((index + 1) % pageYieldBatchSize === 0) {
+                await yieldToUi();
+            }
+        }
+
+        await writeSliceFile(vault, normalizePath(`${idxDir}/undated.md`), undatedContent);
+        sliceFileNames.push('undated.md');
+        options.onProgress?.('Wrote index slice undated.md');
+        await yieldToUi();
+    }
+
+    const keepSliceNames = new Set(sliceFileNames);
+    const staleSliceFiles = (vault.getMarkdownFiles() as TFile[]).filter((file) => {
+        if (!file.path.startsWith(idxDir + '/')) {
+            return false;
+        }
+
+        const isMonthlySlice = /^\d{4}-\d{2}\.md$/.test(file.name);
+        const isUndatedSlice = file.name === 'undated.md';
+        if (!isMonthlySlice && !isUndatedSlice) {
+            return false;
+        }
+
+        return !keepSliceNames.has(file.name);
+    });
+
+    for (let index = 0; index < staleSliceFiles.length; index++) {
+        await vault.delete(staleSliceFiles[index]);
+        if ((index + 1) % pageYieldBatchSize === 0) {
+            await yieldToUi();
+        }
+    }
+
+    let tocContent = `# Wiki Index\n\n**Last Updated:** ${lastUpdated}\n\n**Total Pages:** ${pages.length}\n\n`;
+    for (const fileName of sliceFileNames) {
+        const label = fileName.replace('.md', '');
+        tocContent += `- [[${idxDir}/${label}|${label}]]\n`;
+    }
+    await writeSliceFile(vault, normalizePath(`${idxDir}/index.md`), tocContent);
+    options.onProgress?.(`Wrote index table of contents (${sliceFileNames.length} slices)`);
+
+    return {
+        pageCount: pages.length,
+        slices: sliceFileNames.length,
+    };
+}
+
+async function yieldToUi(): Promise<void> {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
 }
 
 function parsePropertyValue(property: WikiPropertyName, value: unknown): string | string[] {
@@ -315,6 +662,7 @@ export const createWikiPageTool: ToolDefinition = {
         const settings = context.settings;
         const title = params.title as string;
         const content = params.content as string;
+        const extracted = extractIngestMetadataFromContent(content);
         const summary = (params.summary as string) || '';
         const tags = (params.tags as string)?.split(',').map(t => t.trim()).filter(Boolean) || [];
         const relatedInput = (params.related as string)?.split(',').map(r => r.trim()).filter(Boolean) || [];
@@ -325,7 +673,8 @@ export const createWikiPageTool: ToolDefinition = {
         const path = normalizePath(`${settings.wikiPath}/${fileName}.md`);
 
         // Build related array: include source_path if provided
-        const related: string[] = normalizeRelatedLinks(relatedInput, settings.wikiPath);
+        const relatedCandidates = relatedInput.length > 0 ? relatedInput : extracted.related;
+        const related: string[] = normalizeRelatedLinks(relatedCandidates, settings.wikiPath);
         if (sourcePath) {
             const normalizedSourcePath = normalizePath(sourcePath);
             const sourceFile = vault.getAbstractFileByPath(normalizedSourcePath);
@@ -343,24 +692,21 @@ export const createWikiPageTool: ToolDefinition = {
             title,
             created: now,
             updated: now,
-            tags,
+            tags: tags.length > 0 ? tags : extracted.tags,
             related,
         };
 
         // Extract summary from ## Summary section of the content for frontmatter
         const summaryMaxLength = context.settings.summaryMaxLength ?? 200;
-        const summaryBodyMatch = content.match(/^## Summary\s*\n([\s\S]*?)(?=^##|\Z)/m);
-        const extractedSummary = summary || (summaryBodyMatch ? summaryBodyMatch[1].replace(/\s+/g, ' ').trim() : '');
+        const extractedSummary = summary || extracted.summary || '';
         if (extractedSummary) {
             frontmatter.summary = extractedSummary.slice(0, summaryMaxLength);
         }
 
-        const fullContent = `${generateFrontmatter(frontmatter)}
+        const mainContent = extracted.content || content.trim();
+        const contentBody = formatWikiBodyFromMainContent(mainContent);
 
-# ${title}
-
-${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
-`;
+        const fullContent = `${generateFrontmatter(frontmatter)}\n\n${contentBody}`;
 
         try {
             // Ensure Wiki directory exists
@@ -379,7 +725,9 @@ ${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
                     title,
                     created: existingFrontmatter?.created || now,
                     updated: now,
-                    tags: tags.length > 0 ? tags : (existingFrontmatter?.tags || []),
+                    tags: tags.length > 0
+                        ? tags
+                        : (extracted.tags.length > 0 ? extracted.tags : (existingFrontmatter?.tags || [])),
                     related: related.length > 0 ? related : (existingFrontmatter?.related || []),
                 };
 
@@ -388,12 +736,7 @@ ${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
                     mergedFrontmatter.summary = extractedSummary.slice(0, summaryMaxLength);
                 }
 
-                const updatedContent = `${generateFrontmatter(mergedFrontmatter)}
-
-# ${title}
-
-${summary ? `## Summary\n\n${summary}\n\n` : ''}## Content\n\n${content}
-`;
+                const updatedContent = `${generateFrontmatter(mergedFrontmatter)}\n\n${contentBody}`;
 
                 await vault.modify(existingFile, updatedContent);
                 return { success: true, data: { path, title, action: 'updated' } };
@@ -473,49 +816,43 @@ export const updateWikiPageTool: ToolDefinition = {
                 frontmatter.related = normalizeRelatedLinks(inputRelated, context.settings.wikiPath);
             }
 
-            let newBody = body;
+            let extractedFromContent: ExtractedIngestMetadata | null = null;
             if (params.content) {
-                if (params.append) {
-                    newBody = body + '\n\n' + (params.content as string);
-                } else {
-                    newBody = params.content as string;
+                extractedFromContent = extractIngestMetadataFromContent(params.content as string);
+
+                if (!params.tags && extractedFromContent.tags.length > 0) {
+                    frontmatter.tags = extractedFromContent.tags;
+                }
+
+                if (!params.related && extractedFromContent.related.length > 0) {
+                    frontmatter.related = normalizeRelatedLinks(extractedFromContent.related, context.settings.wikiPath);
+                }
+
+                if (extractedFromContent.summary) {
+                    const summaryMaxLength = context.settings.summaryMaxLength ?? 200;
+                    frontmatter.summary = extractedFromContent.summary.slice(0, summaryMaxLength);
                 }
             }
 
-            // Add or update source link if source_path is provided
-            let sourceSection = '';
+            let newBody = body;
+            if (params.content) {
+                const replacement = extractedFromContent?.content || (params.content as string).trim();
+                if (params.append) {
+                    newBody = body + '\n\n' + replacement;
+                } else {
+                    newBody = formatWikiBodyFromMainContent(replacement);
+                }
+            }
+
+            // Keep source metadata in frontmatter related instead of inserting body sections.
             if (sourcePath) {
                 const normalizedSourcePath = normalizePath(sourcePath);
                 const sourceFile = vault.getAbstractFileByPath(normalizedSourcePath);
                 if (sourceFile instanceof TFile) {
-                    // Use [[path|basename]] format for source link (remove .md from path)
                     const linkPath = normalizedSourcePath.replace(/\.md$/, '');
-                    sourceSection = `## Source\n\nOriginal file: [[${linkPath}|${sourceFile.basename}]]\n\n`;
-                    
-                    // Check if body already has a Source section, if so replace it
-                    const sourceSectionRegex = /## Source\n\nOriginal file: \[\[[^\]]+\]\]\n\n/;
-                    if (sourceSectionRegex.test(newBody)) {
-                        newBody = newBody.replace(sourceSectionRegex, sourceSection);
-                        sourceSection = ''; // Already added in replacement
-                    } else if (!newBody.includes('## Source')) {
-                        // Add source section after the title (first # line)
-                        const lines = newBody.split('\n');
-                        let insertIndex = 0;
-                        for (let i = 0; i < lines.length; i++) {
-                            if (lines[i].startsWith('# ')) {
-                                insertIndex = i + 1;
-                                // Skip empty lines after title
-                                while (insertIndex < lines.length && lines[insertIndex].trim() === '') {
-                                    insertIndex++;
-                                }
-                                break;
-                            }
-                        }
-                        if (insertIndex > 0) {
-                            lines.splice(insertIndex, 0, '', sourceSection.trim(), '');
-                            newBody = lines.join('\n');
-                            sourceSection = ''; // Already added
-                        }
+                    const sourceLink = `[[${linkPath}|${sourceFile.basename}]]`;
+                    if (!frontmatter.related.includes(sourceLink)) {
+                        frontmatter.related.push(sourceLink);
                     }
                 }
             }
@@ -1073,6 +1410,22 @@ export const updateIndexTool: ToolDefinition = {
     },
 };
 
+export const optimizedUpdateIndexTool: ToolDefinition = {
+    name: 'update_index',
+    description: 'Update the Wiki index.md with all current pages',
+    parameters: updateIndexTool.parameters,
+    handler: async (_params, context: ToolContext): Promise<ToolResult> => {
+        try {
+            const result = await rebuildGeneratedWikiIndex(context.app as App, context.settings, {
+                pageYieldBatchSize: 100,
+            });
+            return { success: true, data: result };
+        } catch (error) {
+            return { success: false, error: String(error) };
+        }
+    },
+};
+
 /**
  * Log an operation to log.md
  */
@@ -1173,6 +1526,6 @@ export const wikiTools: ToolDefinition[] = [
     readPartTool,
     updatePartTool,
     addBacklinkTool,
-    updateIndexTool,
+    optimizedUpdateIndexTool,
     logOperationTool,
 ];

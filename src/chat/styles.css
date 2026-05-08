@@ -414,6 +414,27 @@
     background: var(--background-secondary);
 }
 
+.history-title-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.clear-all-btn {
+    background: none;
+    border: none;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-error);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.clear-all-btn:hover {
+    color: var(--text-on-accent);
+    background: var(--text-error);
+}
+
 .close-btn {
     background: none;
     border: none;

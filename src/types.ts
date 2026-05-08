@@ -392,6 +392,8 @@ export interface LintResult {
     lastLintTime: number;
 }
 
+export type SearchIndexStatus = 'idle' | 'building' | 'ready' | 'error';
+
 // ============== Chat Types ==============
 
 // Context type

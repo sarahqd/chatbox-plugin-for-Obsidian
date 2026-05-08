@@ -4,7 +4,7 @@
  */
 
 import { Plugin, PluginSettingTab, App, Setting, WorkspaceLeaf, TFile, Notice, Modal, normalizePath, EventRef } from 'obsidian';
-import type { LLMWikiSettings, LLMProvider, ModelConfig, EmbeddingModelConfig } from './types';
+import type { LLMWikiSettings, LLMProvider, ModelConfig, EmbeddingModelConfig, SearchIndexStatus } from './types';
 import { DEFAULT_SETTINGS, PROVIDER_CATALOG, getProviderMetadata } from './types';
 import { getLLMClient, resetLLMClient } from './llm/client';
 import { ingestFile, ingestContent, ingestFiles } from './flows/ingest';
@@ -12,6 +12,7 @@ import { queryWiki } from './flows/query';
 import { lintWiki } from './flows/lint';
 import { EnhancedChatView } from './chat/EnhancedChatView';
 import { WikiSearchEngine } from './search/WikiSearchEngine';
+import { rebuildGeneratedWikiIndex } from './tools/wikiTools';
 
 // View type constant
 const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
@@ -21,12 +22,16 @@ const VIEW_TYPE_CHAT = 'llm-wiki-chat-view';
  */
 export default class LLMWikiPlugin extends Plugin {
     settings!: LLMWikiSettings;
-    /** Shared BM25 index — built once on load, kept in-sync via vault events. */
+    /** Shared BM25 index �?built once on load, kept in-sync via vault events. */
     searchEngine!: WikiSearchEngine;
+    private searchIndexStatus: SearchIndexStatus = 'idle';
+    private searchIndexTask: Promise<{ pageCount: number; slices: number }> | null = null;
+    private searchIndexError: string | null = null;
+    private pendingModifyTimers = new Map<string, number>();
     private autoLintTimer: number | null = null;
     private isLintRunning = false;
     private autoIngestTimer: number | null = null;
-    private autoIngestEventRef: EventRef | null = null;
+    private autoIngestEventRefs: EventRef[] = [];
     private autoIngestQueue = new Set<string>();
     private isIngestRunning = false;
 
@@ -103,26 +108,60 @@ export default class LLMWikiPlugin extends Plugin {
         // Initialize source-file auto-ingest trigger
         this.setupAutoIngestTrigger();
 
-        // Build shared BM25 index (zero I/O — uses metadataCache).
+        // Build shared BM25 index (zero I/O �?uses metadataCache).
         // Kept in-sync via vault events so queryWiki can skip reading index.md.
         this.searchEngine = new WikiSearchEngine(this.app, this.settings);
         this.app.workspace.onLayoutReady(() => {
-            this.searchEngine.build();
+            void this.ensureSearchIndexReady('startup');
             this.registerEvent(this.app.vault.on('create', f => {
-                if (f instanceof TFile && f.extension === 'md') this.searchEngine.onFileCreated(f);
+                if (f instanceof TFile && f.extension === 'md') {
+                    this.searchEngine.onFileCreated(f);
+                }
             }));
             this.registerEvent(this.app.vault.on('delete', f => {
-                if (f instanceof TFile) this.searchEngine.onFileDeleted(f.path);
+                if (f instanceof TFile) {
+                    this.clearPendingModify(f.path);
+                    this.searchEngine.onFileDeleted(f.path);
+                }
             }));
             this.registerEvent(this.app.vault.on('modify', f => {
-                if (f instanceof TFile && f.extension === 'md') this.searchEngine.onFileChanged(f);
+                if (f instanceof TFile && f.extension === 'md') {
+                    this.scheduleSearchIndexModify(f);
+                }
             }));
         });
 
         console.log('WikiChat Plugin loaded');
     }
 
+    getSearchIndexStatus(): SearchIndexStatus {
+        return this.searchIndexStatus;
+    }
+
+    getSearchIndexStatusMessage(): string {
+        if (this.searchIndexStatus === 'building') {
+            return 'Search index is rebuilding; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+        }
+
+        if (this.searchIndexStatus === 'error') {
+            return this.searchIndexError
+                ? `Search index is unavailable: ${this.searchIndexError}. Use read-only tools if a specific page is needed.`
+                : 'Search index is unavailable; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+        }
+
+        if (this.searchIndexStatus === 'idle') {
+            return 'Search index is not ready yet; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
+        }
+
+        return '';
+    }
+
     onunload() {
+        for (const timer of this.pendingModifyTimers.values()) {
+            window.clearTimeout(timer);
+        }
+        this.pendingModifyTimers.clear();
+
         if (this.autoLintTimer !== null) {
             window.clearInterval(this.autoLintTimer);
             this.autoLintTimer = null;
@@ -133,13 +172,98 @@ export default class LLMWikiPlugin extends Plugin {
             this.autoIngestTimer = null;
         }
 
-        if (this.autoIngestEventRef) {
-            this.app.vault.offref(this.autoIngestEventRef);
-            this.autoIngestEventRef = null;
+        for (const eventRef of this.autoIngestEventRefs) {
+            this.app.vault.offref(eventRef);
         }
+        this.autoIngestEventRefs = [];
 
         this.app.workspace.detachLeavesOfType(VIEW_TYPE_CHAT);
         console.log('WikiChat Plugin unloaded');
+    }
+
+    private clearPendingModify(path: string) {
+        const timer = this.pendingModifyTimers.get(path);
+        if (timer !== undefined) {
+            window.clearTimeout(timer);
+            this.pendingModifyTimers.delete(path);
+        }
+    }
+
+    private scheduleSearchIndexModify(file: TFile) {
+        this.clearPendingModify(file.path);
+        const timer = window.setTimeout(() => {
+            this.pendingModifyTimers.delete(file.path);
+            this.searchEngine.onFileChanged(file);
+        }, 500);
+        this.pendingModifyTimers.set(file.path, timer);
+    }
+
+    private async ensureSearchIndexReady(reason: 'startup' | 'manual'): Promise<{ pageCount: number; slices: number }> {
+        if (this.searchIndexTask) {
+            if (reason === 'manual') {
+                new Notice('Wiki index rebuild is already running');
+            }
+            return this.searchIndexTask;
+        }
+
+        this.searchIndexStatus = 'building';
+        this.searchIndexError = null;
+
+        const notice = new Notice(
+            reason === 'startup' ? 'Building Wiki search index...' : 'Rebuilding Wiki index...',
+            0
+        );
+
+        this.searchIndexTask = (async () => {
+            try {
+                let lastSearchUpdate = 0;
+                const pageCount = await this.searchEngine.rebuildInBatches(250, (indexed, total) => {
+                    if (indexed === total || indexed - lastSearchUpdate >= 250) {
+                        lastSearchUpdate = indexed;
+                        this.updateNotice(notice, `Building Wiki search index... ${indexed}/${total}`);
+                    }
+                });
+
+                this.updateNotice(notice, 'Rebuilding generated Wiki index...');
+                const generatedIndex = await rebuildGeneratedWikiIndex(this.app, this.settings, {
+                    pageYieldBatchSize: 100,
+                    onProgress: (message) => this.updateNotice(notice, message),
+                });
+
+                this.searchIndexStatus = 'ready';
+                this.searchIndexError = null;
+                this.updateNotice(
+                    notice,
+                    `Wiki index ready: ${pageCount} pages, ${generatedIndex.slices} slices`
+                );
+                return generatedIndex;
+            } catch (error) {
+                const reasonText = error instanceof Error ? error.message : String(error);
+                this.searchIndexStatus = 'error';
+                this.searchIndexError = reasonText;
+                this.updateNotice(notice, `Wiki index rebuild failed: ${reasonText}`);
+                throw error;
+            } finally {
+                window.setTimeout(() => notice.hide(), 2000);
+                this.searchIndexTask = null;
+            }
+        })();
+
+        return this.searchIndexTask;
+    }
+
+    private updateNotice(notice: Notice, message: string) {
+        const noticeWithMessage = notice as Notice & {
+            setMessage?: (message: string) => void;
+            noticeEl?: HTMLElement;
+        };
+
+        if (typeof noticeWithMessage.setMessage === 'function') {
+            noticeWithMessage.setMessage(message);
+            return;
+        }
+
+        noticeWithMessage.noticeEl?.setText(message);
     }
 
     setupAutoLintSchedule() {
@@ -159,10 +283,10 @@ export default class LLMWikiPlugin extends Plugin {
     }
 
     setupAutoIngestTrigger() {
-        if (this.autoIngestEventRef) {
-            this.app.vault.offref(this.autoIngestEventRef);
-            this.autoIngestEventRef = null;
+        for (const eventRef of this.autoIngestEventRefs) {
+            this.app.vault.offref(eventRef);
         }
+        this.autoIngestEventRefs = [];
 
         if (this.autoIngestTimer !== null) {
             window.clearTimeout(this.autoIngestTimer);
@@ -181,7 +305,7 @@ export default class LLMWikiPlugin extends Plugin {
             `trigger=enabled sourcesPath=${normalizePath(this.settings.sourcesPath)}`
         );
 
-        this.autoIngestEventRef = this.app.vault.on('create', (file) => {
+        const onCandidateFile = (eventName: 'create' | 'modify' | 'rename', file: unknown) => {
             if (!(file instanceof TFile)) {
                 return;
             }
@@ -190,21 +314,38 @@ export default class LLMWikiPlugin extends Plugin {
                 return;
             }
 
-            void this.appendAutoIngestLog('info', `event=create file=${file.path}`);
+            void this.appendAutoIngestLog('info', `event=${eventName} file=${file.path}`);
             this.enqueueAutoIngest(file.path);
-        });
+        };
+
+        this.autoIngestEventRefs.push(
+            this.app.vault.on('create', (file) => onCandidateFile('create', file))
+        );
+
+        this.autoIngestEventRefs.push(
+            this.app.vault.on('modify', (file) => onCandidateFile('modify', file))
+        );
+
+        this.autoIngestEventRefs.push(
+            this.app.vault.on('rename', (file) => onCandidateFile('rename', file))
+        );
     }
 
     private shouldAutoIngest(file: TFile): boolean {
         const sourcesRoot = normalizePath(this.settings.sourcesPath);
+        const normalizedPath = normalizePath(file.path);
         const sourcePrefix = `${sourcesRoot}/`;
 
-        if (!(file.path === sourcesRoot || file.path.startsWith(sourcePrefix))) {
+        const normalizedSourcesRoot = sourcesRoot.toLowerCase();
+        const normalizedPathLower = normalizedPath.toLowerCase();
+        const sourcePrefixLower = sourcePrefix.toLowerCase();
+
+        if (!(normalizedPathLower === normalizedSourcesRoot || normalizedPathLower.startsWith(sourcePrefixLower))) {
             return false;
         }
 
         const extension = file.extension.toLowerCase();
-        return extension === 'md' || extension === 'txt';
+        return extension === 'md' || extension === 'txt' || extension === 'json';
     }
 
     private enqueueAutoIngest(filePath: string) {
@@ -426,7 +567,7 @@ export default class LLMWikiPlugin extends Plugin {
                 return false;
             }
 
-            new Notice('✅ Model connection successful', 4000);
+            new Notice('�?Model connection successful', 4000);
             return true;
         } catch (error) {
             console.warn('Configured LLM health check failed:', error);
@@ -480,9 +621,9 @@ export default class LLMWikiPlugin extends Plugin {
             });
 
             if (result.success) {
-                new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
+                new Notice(`�?Ingestion successful: ${result.entities.length} entities`);
             } else {
-                new Notice(`❌ Ingestion failed: ${result.message}`);
+                new Notice(`�?Ingestion failed: ${result.message}`);
             }
         } finally {
             this.isIngestRunning = false;
@@ -511,9 +652,9 @@ export default class LLMWikiPlugin extends Plugin {
             });
 
             if (result.success) {
-                new Notice(`✅ Ingestion successful: ${result.entities.length} entities`);
+                new Notice(`�?Ingestion successful: ${result.entities.length} entities`);
             } else {
-                new Notice(`❌ Ingestion failed: ${result.message}`);
+                new Notice(`�?Ingestion failed: ${result.message}`);
             }
         } finally {
             this.isIngestRunning = false;
@@ -559,7 +700,7 @@ export default class LLMWikiPlugin extends Plugin {
 
             if (result.issues.length === 0) {
                 if (mode === 'manual') {
-                    new Notice('✅ Wiki is in good condition, no issues found');
+                    new Notice('�?Wiki is in good condition, no issues found');
                 }
             } else {
                 new Notice(`Found ${result.issues.length} issues, fixed ${result.fixed} of them`);
@@ -567,29 +708,19 @@ export default class LLMWikiPlugin extends Plugin {
         } catch (error) {
             console.error('Maintenance check failed:', error);
             await this.appendMaintenanceLog(mode, 'error', `reason=${String(error)}`);
-            new Notice('❌ Wiki maintenance check failed');
+            new Notice('�?Wiki maintenance check failed');
         } finally {
             this.isLintRunning = false;
         }
     }
 
     async reindexWiki() {
-        new Notice('Rebuilding Wiki index...');
-
-        // Use the update_index tool
-        const { executeTool } = await import('./tools');
-        const context = {
-            vault: this.app.vault,
-            app: this.app,
-            settings: this.settings,
-        };
-
-        const result = await executeTool('update_index', {}, context);
-
-        if (result.success) {
-            new Notice(`✅ Index rebuild successful: ${(result.data as any).pageCount} pages`);
-        } else {
-            new Notice(`❌ Index rebuild failed: ${result.error}`);
+        try {
+            const result = await this.ensureSearchIndexReady('manual');
+            new Notice(`Index rebuild successful: ${result.pageCount} pages`);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            new Notice(`Index rebuild failed: ${message}`);
         }
     }
 }
@@ -1158,7 +1289,7 @@ class ModelEditModal extends Modal {
 }
 
 /**
- * Embedding Model Edit Modal — mirrors ModelEditModal for EmbeddingModelConfig
+ * Embedding Model Edit Modal �?mirrors ModelEditModal for EmbeddingModelConfig
  */
 class EmbeddingModelEditModal extends Modal {
     private plugin: LLMWikiPlugin;
@@ -1304,3 +1435,4 @@ class EmbeddingModelEditModal extends Modal {
         this.contentEl.empty();
     }
 }
+
