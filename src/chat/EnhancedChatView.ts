@@ -34,7 +34,7 @@ const WELCOME_MESSAGE = 'Hello! I am the WikiChat assistant. I can help you:\n\n
 
 type DisplayMode = 'chat' | 'history';
 
-const SEARCH_FILES_CALL_BUDGET = 2;
+const SEARCH_FILES_CALL_BUDGET = 5;
 const SEARCH_FILES_DEFAULT_MAX_RESULTS = 30;
 
 interface ChatViewPluginApi {
@@ -259,7 +259,7 @@ export class EnhancedChatView extends ItemView {
         if (!this.messagesEl) return;
         this.messagesEl.empty();
 
-        this.messages.forEach(message => {
+        this.messages.forEach((message, index) => {
             const wrapperEl = this.messagesEl!.createDiv({ cls: `message-wrapper ${message.role}` });
 
             // Bubble: Only content, no icons and names displayed
@@ -267,7 +267,12 @@ export class EnhancedChatView extends ItemView {
             const contentEl = bubbleEl.createDiv({ cls: 'message-content' });
             
             // Check if this is an empty assistant message during loading - show loading indicator
-            const isEmptyAssistant = message.role === 'assistant' && !message.content.trim() && this.isLoading;
+            const isLastMessage = index === this.messages.length - 1;
+            const isEmptyAssistant =
+                message.role === 'assistant' &&
+                !message.content.trim() &&
+                this.isLoading &&
+                isLastMessage;
             
             if (isEmptyAssistant) {
                 // Show animated loading indicator
@@ -926,7 +931,12 @@ You can use the following tools to complete tasks:
 - update_index: Update Wiki index
 
 Tool selection rules:
-- When searching articles, use staged retrieval: Read_Property first, then Read_Summary, and only read full content when relevance is high.
+- Follow this staged retrieval chain for queries:
+    1) Start from candidate pages already available in retrieved context (BM25 sections), explicit wiki links, or known paths.
+    2) For each candidate, call Read_Property first (prefer property: title, tags, related).
+    3) Then call Read_Summary for candidates that match intent.
+    4) Call read_file only when summary-level evidence is insufficient.
+- Use search_files only after at least one successful Read_Property call in the current response, and only when candidate paths are still insufficient.
 - Consider relevance high only when title/tags/related or summary clearly match the user intent.
 - If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
 - If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
@@ -1379,14 +1389,17 @@ When you need to use tools, please call the corresponding tool functions.`;
             const client = getLLMClient(this.plugin.settings);
             
             // Get tool definitions
-            const tools = getOllamaTools();
+            let activeTools = getOllamaTools();
+            let searchFilesBudgetExceeded = false;
+            let searchFilesOrderDegraded = false;
+            let hasReadPropertyInTurn = false;
             
             // Check if current model supports tool calls
             let useTools = currentModelConfig?.supportsTools ?? true; // Read from model config, default true
             
             // Tool call loop — prevent infinite loops with a reasonable upper bound
             // Can be configured per model or use a sensible default
-            const maxIterations = currentModelConfig?.maxToolIterations ?? 100; // Configurable, default to 5
+            const maxIterations = currentModelConfig?.maxToolIterations ?? 100; // Configurable, default to 100
             let iteration = 0;
             
             while (iteration < maxIterations) {
@@ -1403,7 +1416,7 @@ When you need to use tools, please call the corresponding tool functions.`;
                             fullResponse += chunk;
                             this.appendToLastMessage(chunk);
                         },
-                        tools: useTools ? tools : undefined, 
+                        tools: useTools ? activeTools : undefined, 
                         systemPrompt,
                         signal  // Pass abort signal for cancellation
                     });
@@ -1443,11 +1456,43 @@ When you need to use tools, please call the corresponding tool functions.`;
                                         ? { ...(toolArgs as Record<string, unknown>) }
                                         : {};
 
+                                if (toolName === 'search_files' && !hasReadPropertyInTurn) {
+                                    const orderError = 'search_files requires staged retrieval. Call Read_Property first in this response.';
+                                    this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${orderError}`);
+
+                                    // Degrade retrieval for this response to avoid repeated order violations.
+                                    if (!searchFilesOrderDegraded) {
+                                        searchFilesOrderDegraded = true;
+                                        activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
+                                        this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response. Continue with `Read_Property` -> `Read_Summary` -> `read_file` as needed.');
+                                    }
+
+                                    toolResults.push({
+                                        role: 'tool',
+                                        content: JSON.stringify({
+                                            success: false,
+                                            error: orderError,
+                                            nextStep: 'Use Read_Property on candidate wiki pages first, then Read_Summary, then read_file if still needed.'
+                                        }),
+                                        toolCallId: toolCall.id
+                                    });
+                                    continue;
+                                }
+
                                 if (toolName === 'search_files') {
                                     this.searchFilesCallCount += 1;
                                     if (this.searchFilesCallCount > SEARCH_FILES_CALL_BUDGET) {
                                         const budgetError = `search_files call budget exceeded (${SEARCH_FILES_CALL_BUDGET} per message). Narrow path scope or use Read_Property/Read_Summary first.`;
                                         this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${budgetError}`);
+
+                                        // Degrade retrieval strategy for this turn: disable search_files,
+                                        // keep narrow read tools so the model can still finish the answer.
+                                        if (!searchFilesBudgetExceeded) {
+                                            searchFilesBudgetExceeded = true;
+                                            activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
+                                            this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response; continuing with read-only page tools.');
+                                        }
+
                                         toolResults.push({
                                             role: 'tool',
                                             content: JSON.stringify({ success: false, error: budgetError }),
@@ -1463,6 +1508,10 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 
                                 // Execute tool
                                 const result = await executeTool(toolName, normalizedToolArgs, toolContext);
+
+                                if (toolName === 'Read_Property' && result.success) {
+                                    hasReadPropertyInTurn = true;
+                                }
                                 
                                 // Display tool result with markdown formatting
                                 if (result.success) {
@@ -1545,13 +1594,55 @@ When you need to use tools, please call the corresponding tool functions.`;
                         break;
                     }
                     
-                    // Other errors, throw directly
-                    throw error;
+                    // On other errors, degrade to no-tool mode and still try to complete the response.
+                    this.appendToLastMessage(`\n\n⚠️ Tool-call round failed, retrying without tools: ${errorMsg}`);
+                    useTools = false;
+                    let retryResponse = '';
+                    await client.chatStream({
+                        messages,
+                        onChunk: (chunk: string) => {
+                            retryResponse += chunk;
+                            this.appendToLastMessage(chunk);
+                        },
+                        tools: undefined,
+                        systemPrompt,
+                        signal
+                    });
+
+                    if (this.messages.length > 0) {
+                        this.messages[this.messages.length - 1].content = retryResponse;
+                    }
+                    break;
                 }
             }
             
             if (iteration >= maxIterations) {
                 this.appendToLastMessage('\n\n⚠️ Reached maximum tool call limit');
+
+                // Final no-tool pass: force the model to produce a best-effort answer
+                // from already collected context/tool outputs instead of ending mid-loop.
+                try {
+                    let fallbackResponse = '';
+                    await client.chatStream({
+                        messages: [
+                            ...messages,
+                            {
+                                role: 'user',
+                                content: 'Tool-call limit reached. Do not call tools. Provide the best possible answer based on collected context and tool outputs so far. If uncertain, clearly say what is missing.'
+                            }
+                        ],
+                        onChunk: (chunk: string) => {
+                            fallbackResponse += chunk;
+                            this.appendToLastMessage(chunk);
+                        },
+                        tools: undefined,
+                        systemPrompt,
+                        signal
+                    });
+
+                } catch (fallbackError) {
+                    this.appendToLastMessage(`\n❌ **Fallback generation failed:** ${String(fallbackError)}`);
+                }
             }
 
         } catch (error) {
@@ -1566,12 +1657,20 @@ When you need to use tools, please call the corresponding tool functions.`;
                     this.renderMessages();
                 }
             } else {
+                // Ensure the pending assistant bubble doesn't remain empty after failures.
+                const lastMessage = this.messages[this.messages.length - 1];
+                if (lastMessage && lastMessage.role === 'assistant' && !lastMessage.content.trim()) {
+                    lastMessage.content = '*Response failed. Please try again.*';
+                    this.renderMessages();
+                }
                 this.addMessage('system', `❌ Error: ${error}`);
             }
         } finally {
             // Clean up abort controller
             this.abortController = null;
             this.isLoading = false;
+            // Force a render after loading finishes so loading dots are removed immediately.
+            this.renderMessages();
             this.updateSendButton();
         }
     }
