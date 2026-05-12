@@ -989,7 +989,7 @@ export const batchReadSummaryTool: ToolDefinition = {
 
 export const updateSummaryTool: ToolDefinition = {
     name: 'Update_Summary',
-    description: 'Modify only the Summary section of a Wiki page',
+    description: 'Modify the Summary of a Wiki page: updates both frontmatter.summary and ## Summary section in body (if exists)',
     parameters: {
         type: 'object',
         properties: {
@@ -1007,6 +1007,7 @@ export const updateSummaryTool: ToolDefinition = {
     handler: async (params, context: ToolContext): Promise<ToolResult> => {
         const vault = context.vault as any;
         const path = normalizePath(params.path as string);
+        const newSummary = params.summary as string;
 
         try {
             const page = await readWikiPage(vault, path);
@@ -1014,14 +1015,28 @@ export const updateSummaryTool: ToolDefinition = {
                 return { success: false, error: page.error };
             }
 
-            const newBody = replaceSectionContent(page.body, 'Summary', params.summary as string);
-            if (newBody === null) {
-                return { success: false, error: 'Summary section not found' };
-            }
+            // Update frontmatter.summary
+            const summaryMaxLength = context.settings.summaryMaxLength ?? 200;
+            page.frontmatter.summary = newSummary.slice(0, summaryMaxLength);
+
+            // Try to update ## Summary section in body (if exists)
+            const updatedBody = replaceSectionContent(page.body, 'Summary', newSummary);
+            const hasSummarySection = updatedBody !== null;
+            
+            // If no ## Summary section in body, just keep the original body
+            // The summary is stored in frontmatter only
+            const newBody = hasSummarySection ? updatedBody : page.body;
 
             touchUpdated(page.frontmatter);
             await saveWikiPage(vault, page.file, page.frontmatter, newBody);
-            return { success: true, data: { path } };
+            return { 
+                success: true, 
+                data: { 
+                    path,
+                    frontmatterUpdated: true,
+                    bodySectionUpdated: hasSummarySection,
+                } 
+            };
         } catch (error) {
             return { success: false, error: String(error) };
         }

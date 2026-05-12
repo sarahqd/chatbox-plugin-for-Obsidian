@@ -102,7 +102,7 @@ export class WikiSearchEngine {
             }
 
             onProgress?.(Math.min(start + batch.length, wikiFiles.length), wikiFiles.length);
-            await yieldToUi();
+            await yieldToUI();
         }
 
         this.ready = true;
@@ -210,6 +210,148 @@ export class WikiSearchEngine {
 
         results.sort((a, b) => b.bm25 - a.bm25);
         return results.slice(0, topN);
+    }
+
+    /**
+     * Find similar terms in the index using edit distance.
+     * Used for fuzzy matching when exact BM25 returns no results.
+     */
+    private findSimilarTerms(queryTerms: string[], maxDistance: number): Map<string, string[]> {
+        const similarMap = new Map<string, string[]>();
+        
+        for (const queryTerm of queryTerms) {
+            const similar: string[] = [];
+            const queryLen = queryTerm.length;
+            
+            for (const [indexTerm] of this.index) {
+                // Optimization: skip if length difference is too large
+                if (Math.abs(indexTerm.length - queryLen) > maxDistance) {
+                    continue;
+                }
+                
+                const dist = editDistance(queryTerm, indexTerm);
+                if (dist <= maxDistance && dist > 0) {
+                    similar.push(indexTerm);
+                }
+            }
+            
+            if (similar.length > 0) {
+                similarMap.set(queryTerm, similar);
+            }
+        }
+        
+        return similarMap;
+    }
+
+    /**
+     * Fuzzy search using edit distance when exact BM25 returns no results.
+     * Finds similar terms in the index and searches with those.
+     */
+    searchFuzzy(query: string, topN = 30, maxDistance = 2): SearchResult[] {
+        if (!this.ready || this.docs.size === 0) {
+            return [];
+        }
+
+        const queryTerms = tokenize(query);
+        if (queryTerms.length === 0) {
+            return [];
+        }
+
+        // Find similar terms for each query term
+        const similarTermsMap = this.findSimilarTerms(queryTerms, maxDistance);
+        if (similarTermsMap.size === 0) {
+            return [];
+        }
+
+        // Build expanded query terms (original + similar)
+        const expandedTerms: string[] = [];
+        for (const [original, similar] of similarTermsMap) {
+            expandedTerms.push(original, ...similar);
+        }
+
+        // Perform BM25 search with expanded terms
+        const docCount = this.docs.size;
+        const scores = new Map<string, number>();
+
+        for (const term of expandedTerms) {
+            const entry = this.index.get(term);
+            if (!entry || entry.df === 0) {
+                continue;
+            }
+
+            // Penalize fuzzy matches with lower IDF
+            const isFuzzyMatch = !queryTerms.includes(term);
+            const idf = Math.log((docCount - entry.df + 0.5) / (entry.df + 0.5) + 1);
+            const fuzzyPenalty = isFuzzyMatch ? 0.7 : 1.0;
+
+            for (const [path, weightedTf] of entry.docs) {
+                const doc = this.docs.get(path);
+                if (!doc) {
+                    continue;
+                }
+
+                const docLen = (
+                    doc.lenTitle * W.title +
+                    doc.lenTags * W.tags +
+                    doc.lenSummary * W.summary +
+                    doc.lenHeadings * W.headings
+                );
+                const avgDocLen = (
+                    this.avgLen.title * W.title +
+                    this.avgLen.tags * W.tags +
+                    this.avgLen.summary * W.summary +
+                    this.avgLen.headings * W.headings
+                );
+                const normalizedLen = avgDocLen > 0 ? docLen / avgDocLen : 1;
+                const tf = weightedTf / (weightedTf + BM25_K1 * (1 - BM25_B + BM25_B * normalizedLen));
+                const score = idf * tf * fuzzyPenalty;
+
+                scores.set(path, (scores.get(path) ?? 0) + score);
+            }
+        }
+
+        if (scores.size === 0) {
+            return [];
+        }
+
+        const nowMs = Date.now();
+        const results: SearchResult[] = [];
+        for (const [path, bm25] of scores) {
+            const doc = this.docs.get(path);
+            if (!doc) {
+                continue;
+            }
+
+            const ageMonths = (nowMs - doc.ctime) / (1000 * 60 * 60 * 24 * 30);
+            const recency = 1 + clamp(12 - ageMonths, -12, 12) * 0.01;
+            results.push({
+                path,
+                title: doc.title,
+                summary: doc.summary,
+                bm25: bm25 * recency,
+                ctime: doc.ctime,
+            });
+        }
+
+        results.sort((a, b) => b.bm25 - a.bm25);
+        return results.slice(0, topN);
+    }
+
+    /**
+     * Unified search entry with fallback chain.
+     * 1. Try exact BM25 search
+     * 2. If no results, try fuzzy matching
+     */
+    searchWithFallback(query: string, topN = 30): SearchResult[] {
+        // Stage 1: Exact BM25
+        const exactResults = this.search(query, topN);
+        if (exactResults.length > 0) {
+            return exactResults;
+        }
+
+        // Stage 2: Fuzzy matching
+        const fuzzyResults = this.searchFuzzy(query, topN);
+        return fuzzyResults;
     }
 
     async rerank(
@@ -563,8 +705,46 @@ function truncateWords(text: string, maxWords: number): string {
     return words.slice(0, maxWords).join(' ') + '...';
 }
 
-async function yieldToUi(): Promise<void> {
+async function yieldToUI(): Promise<void> {
     await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 0);
     });
+}
+
+/**
+ * Calculate Levenshtein edit distance between two strings.
+ * Used for fuzzy term matching.
+ */
+function editDistance(a: string, b: string): number {
+    const m = a.length;
+    const n = b.length;
+    
+    // Quick optimization: if length difference exceeds threshold, skip
+    if (Math.abs(m - n) > 2) {
+        return Math.max(m, n);
+    }
+    
+    // DP table: dp[i][j] = edit distance between a[0..i-1] and b[0..j-1]
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    
+    // Base cases
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    
+    // Fill DP table
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            if (a[i - 1] === b[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = 1 + Math.min(
+                    dp[i - 1][j],     // deletion
+                    dp[i][j - 1],     // insertion
+                    dp[i - 1][j - 1]  // substitution
+                );
+            }
+        }
+    }
+    
+    return dp[m][n];
 }

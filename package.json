@@ -1,6 +1,6 @@
 {
   "name": "wikichat-plugin",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Transform Obsidian into an AI-driven, self-maintaining knowledge base",
   "main": "main.js",
   "scripts": {

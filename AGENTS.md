@@ -147,13 +147,6 @@ You have access to the following tools:
 When user says "Please help me create a page about Python":
 
 ```markdown
----
-title: Python
-created: 2026-04-20
-updated: 2026-04-20
-tags: [programming-language, dynamic-language]
----
-
 # Python
 
 ## Summary

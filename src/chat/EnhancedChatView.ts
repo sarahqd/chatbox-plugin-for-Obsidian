@@ -1980,10 +1980,52 @@ When you need to use tools, please call the corresponding tool functions.`;
         // Handle horizontal rules (---)
         result = result.replace(/^---$/gm, '<hr class="md-hr">');
         
-        // Handle newlines (but not inside code blocks or after block elements)
-        result = result.replace(/\n(?!<\/(?:pre|h[1-6]|ul|ol|li|blockquote|hr)>)/g, '<br>');
+        // Handle paragraphs: split by double newlines and wrap in <p> tags
+        // This provides better control over paragraph spacing than multiple <br> tags
+        result = this.wrapParagraphs(result);
         
         return result;
+    }
+    
+    /**
+     * Wrap content in paragraph tags for better spacing control
+     * Splits by double newlines and wraps each paragraph in <p> tags
+     */
+    private wrapParagraphs(content: string): string {
+        // Block elements that should NOT be wrapped in <p> tags
+        const blockElements = ['pre', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'blockquote', 'hr'];
+        const blockPattern = new RegExp(`<(${blockElements.join('|')})[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi');
+        
+        // Split content by double newlines (one or more blank lines)
+        const parts = content.split(/\n\s*\n/);
+        
+        const processedParts: string[] = [];
+        
+        for (const part of parts) {
+            const trimmed = part.trim();
+            if (!trimmed) continue;
+            
+            // Check if this part starts with a block element
+            const isBlockElement = blockPattern.test(trimmed) || 
+                blockElements.some(el => trimmed.startsWith(`<${el}`));
+            
+            if (isBlockElement) {
+                // Don't wrap block elements in <p> tags, but handle single newlines inside
+                // Replace remaining single newlines with <br> (but not after block elements)
+                const processed = trimmed.replace(/\n(?!<\/(?:pre|h[1-6]|ul|ol|li|blockquote|hr)>)/g, '<br>');
+                processedParts.push(processed);
+            } else {
+                // Wrap in <p> tag and handle single newlines inside
+                // Replace remaining single newlines with <br>
+                const processed = trimmed.replace(/\n/g, '<br>');
+                processedParts.push(`<p class="md-paragraph">${processed}</p>`);
+            }
+            
+            // Reset lastIndex for the regex
+            blockPattern.lastIndex = 0;
+        }
+        
+        return processedParts.join('');
     }
     
     private escapeHtml(text: string): string {
@@ -2204,7 +2246,7 @@ When you need to use tools, please call the corresponding tool functions.`;
     }
 
     /**
-     * Format tool call display as concise one-line text
+     * Format tool call display as concise one-line text with badge styling
      */
     private formatToolCallDisplay(toolName: string, args: Record<string, unknown>): string {
         const getShortPath = (path: string | unknown): string => {
@@ -2243,62 +2285,67 @@ When you need to use tools, please call the corresponding tool functions.`;
         };
 
         const formatter = toolDisplayMap[toolName];
+        let displayText: string;
         if (formatter) {
             try {
-                return formatter(args);
+                displayText = formatter(args);
             } catch {
-                return `🔧 ${toolName}`;
+                displayText = `🔧 ${toolName}`;
             }
+        } else {
+            displayText = `🔧 ${toolName}`;
         }
-        return `🔧 ${toolName}`;
+        
+        // Wrap in a badge span for proper styling and separation
+        return `<span class="tool-call-badge">${displayText}</span>`;
     }
 
     /**
-     * Format tool result display as concise one-line text
+     * Format tool result display as concise one-line text with badge styling
      */
     private formatToolResultDisplay(toolName: string, success: boolean, data: unknown, error?: string): string {
         if (!success) {
-            return `<span class="tool-log-error">❌ ${error || 'Failed'}</span>`;
+            return `<span class="tool-result-badge tool-result-error">❌ ${error || 'Failed'}</span>`;
         }
 
-        // For read operations, show brief info
+        let resultText = '✓';
+
+        // For read operations, show brief info (but NOT content preview to avoid formatting issues)
         if (['Read_Summary', 'Batch_Read_Summary', 'Read_Property', 'Batch_Read_Property', 'Read_Part', 'read_file'].includes(toolName)) {
             if (typeof data === 'object' && data !== null) {
                 if ('value' in data) {
-                    return `<span class="tool-log-success">✓</span>`;
-                }
-                if ('summaries' in data) {
-                    return `<span class="tool-log-success">✓ ${Array.isArray(data.summaries) ? data.summaries.length : 0} summaries</span>`;
-                }
-                if ('properties' in data) {
-                    return `<span class="tool-log-success">✓ ${Array.isArray(data.properties) ? data.properties.length : 0} results</span>`;
-                }
-                if ('content' in data) {
-                    const content = String(data.content);
-                    const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
-                    return `<span class="tool-log-success">✓ ${preview}</span>`;
+                    resultText = '✓';
+                } else if ('summaries' in data) {
+                    resultText = `✓ ${Array.isArray(data.summaries) ? data.summaries.length : 0} summaries`;
+                } else if ('properties' in data) {
+                    resultText = `✓ ${Array.isArray(data.properties) ? data.properties.length : 0} results`;
+                } else if ('content' in data) {
+                    // For read_file, just show success without content preview
+                    // Content preview causes formatting issues when it contains YAML frontmatter
+                    resultText = '✓';
                 }
             }
         }
 
         // For write operations
         if (['write_file', 'append_file', 'update_wiki_page', 'Update_Summary', 'Update_Property', 'Update_Content', 'Update_Part', 'create_wiki_page'].includes(toolName)) {
-            return `<span class="tool-log-success">✓ Done</span>`;
+            resultText = '✓ Done';
         }
 
         // For search operations
         if (toolName === 'search_files') {
             if (typeof data === 'object' && data !== null && 'results' in data) {
-                return `<span class="tool-log-success">✓ ${Array.isArray(data.results) ? data.results.length : 0} matches</span>`;
+                resultText = `✓ ${Array.isArray(data.results) ? data.results.length : 0} matches`;
             }
         }
 
         if (toolName === 'list_files') {
             if (typeof data === 'object' && data !== null && 'files' in data) {
-                return `<span class="tool-log-success">✓ ${Array.isArray(data.files) ? data.files.length : 0} files</span>`;
+                resultText = `✓ ${Array.isArray(data.files) ? data.files.length : 0} files`;
             }
         }
 
-        return `<span class="tool-log-success">✓</span>`;
+        // Wrap in a badge span for proper styling and separation
+        return `<span class="tool-result-badge tool-result-success">${resultText}</span>`;
     }
 }

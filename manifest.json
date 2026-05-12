@@ -1,7 +1,7 @@
 {
   "id": "wikichat-plugin",
   "name": "WikiChat",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "minAppVersion": "1.0.0",
   "description": "Transform Obsidian into an AI-driven, self-maintaining knowledge base with incremental compilation mode.",
   "author": "Sarah Li assisted by AI models",
