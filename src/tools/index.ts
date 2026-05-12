@@ -49,7 +49,14 @@ export function getOllamaTools(): OllamaTool[] {
  * Read-only tools for the query flow.
  * Excludes all write/create/update tools to minimise token usage with local models.
  */
-const QUERY_TOOL_NAMES = new Set(['read_file', 'Read_Summary', 'Read_Property', 'Read_Part']);
+const QUERY_TOOL_NAMES = new Set([
+    'read_file',
+    'Read_Summary',
+    'Batch_Read_Summary',
+    'Read_Property',
+    'Batch_Read_Property',
+    'Read_Part',
+]);
 
 const _cachedQueryTools: OllamaTool[] = allTools
     .filter((tool) => QUERY_TOOL_NAMES.has(tool.name))
@@ -76,7 +83,12 @@ export async function executeTool(
 ): Promise<{ success: boolean; data?: unknown; error?: string }> {
     const tool = toolRegistry.get(name);
     if (!tool) {
-        return { success: false, error: `Unknown tool: ${name}` };
+        // Provide helpful error message with available tool names
+        const availableTools = Array.from(toolRegistry.keys()).sort().join(', ');
+        return { 
+            success: false, 
+            error: `Unknown tool: ${name}. Available tools: ${availableTools}` 
+        };
     }
     return tool.handler(params, context);
 }

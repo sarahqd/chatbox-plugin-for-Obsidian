@@ -179,7 +179,14 @@ export interface ModelConfig {
     isDefault?: boolean;
     supportsTools?: boolean;
     supportsVision?: boolean;
-    maxToolIterations?: number; // Maximum tool call iterations (default 5)
+    maxToolIterations?: number; // Maximum assistant-tool rounds before continuation.
+    maxToolCallsPerTurn?: number; // Maximum total tool calls before continuation.
+    maxToolWallTimeMs?: number; // Maximum tool-loop wall time before continuation.
+    maxContinuationPasses?: number; // Automatic continuation passes when budgets are hit.
+    maxToolResultCharsRatio?: number; // Max chars per tool result as ratio of context chars.
+    historyTurns?: number; // Number of recent turns sent to the model.
+    retrievalTopN?: number; // BM25 candidate count before rerank.
+    retrievalRerankTopK?: number; // Final reranked chunk count injected into prompt.
 }
 
 export interface EmbeddingModelConfig {

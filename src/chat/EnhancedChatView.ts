@@ -16,7 +16,7 @@ import { ChatHistoryManager, ChatSaver } from '../history/ChatHistoryManager';
 import { getLLMClient } from '../llm/client';
 import { getOllamaTools, executeTool } from '../tools/index';
 import { WikiSearchEngine } from '../search/WikiSearchEngine';
-import { getProviderMetadata } from '../types';
+import { getRelevantIndexContext, buildEmbedFn } from '../flows/query';
 import { 
     FileSelector, 
     SnippetSelector, 
@@ -36,6 +36,13 @@ type DisplayMode = 'chat' | 'history';
 
 const SEARCH_FILES_CALL_BUDGET = 5;
 const SEARCH_FILES_DEFAULT_MAX_RESULTS = 30;
+const DEFAULT_MAX_TOOL_ITERATIONS = 8;
+const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 24;
+const DEFAULT_MAX_TOOL_WALL_TIME_MS = 120000;
+const DEFAULT_MAX_CONTINUATION_PASSES = 1;
+const DEFAULT_TOOL_RESULT_RATIO = 0.25;
+const DEFAULT_RETRIEVAL_TOP_N = 20;
+const DEFAULT_RETRIEVAL_RERANK_TOP_K = 8;
 
 interface ChatViewPluginApi {
     settings: LLMWikiSettings;
@@ -118,6 +125,9 @@ export class EnhancedChatView extends ItemView {
     
     // Abort controller for stream cancellation
     private abortController: AbortController | null = null;
+    
+    // Track if currently receiving stream content (vs waiting/paused)
+    private isStreamReceiving: boolean = false;
 
     // File selector
     private fileSelectorEl: HTMLElement | null = null;
@@ -275,11 +285,18 @@ export class EnhancedChatView extends ItemView {
                 isLastMessage;
             
             if (isEmptyAssistant) {
-                // Show animated loading indicator
+                // Show animated loading indicator when waiting for stream to start
                 contentEl.innerHTML = this.renderLoadingIndicator();
             } else {
                 // Render message content with collapsible tool calls
                 this.renderMessageContent(contentEl, message.content);
+                
+                // Show dots only when NOT actively receiving stream content
+                // This means: show dots during tool execution (pause/interval) but not during active streaming
+                if (this.isLoading && message.role === 'assistant' && isLastMessage && !this.isStreamReceiving) {
+                    const dotsIndicator = contentEl.createSpan({ cls: 'loading-dots-indicator' });
+                    dotsIndicator.innerHTML = '<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
+                }
             }
 
             if (message.context && message.context.length > 0) {
@@ -376,10 +393,47 @@ export class EnhancedChatView extends ItemView {
     }
     
     /**
-     * Open a wiki link (file in vault)
+     * Normalize wiki link to ensure it has proper format for resolution.
+     * Handles cases where LLM generates incomplete links like:
+     * - [[PageName]] -> should become [[wiki/PageName.md|PageName]]
+     * - [[PageName.md]] -> should become [[wiki/PageName.md|PageName]]
+     * - [[wiki/PageName]] -> should add .md extension
+     */
+    private normalizeWikiLink(linkText: string): string {
+        const trimmed = linkText.trim();
+        if (!trimmed) return trimmed;
+        
+        const wikiPath = this.plugin.settings.wikiPath;
+        
+        // Already has wiki path prefix
+        if (trimmed.startsWith(`${wikiPath}/`) || trimmed.startsWith(`${wikiPath}\\`)) {
+            // Ensure it has .md extension
+            if (!trimmed.endsWith('.md')) {
+                return `${trimmed}.md`;
+            }
+            return trimmed;
+        }
+        
+        // No wiki path prefix - check if it's a relative path or just a page name
+        if (trimmed.includes('/') || trimmed.includes('\\')) {
+            // Has some path components but missing wiki prefix
+            const withWikiPrefix = `${wikiPath}/${trimmed}`;
+            if (!withWikiPrefix.endsWith('.md')) {
+                return `${withWikiPrefix}.md`;
+            }
+            return withWikiPrefix;
+        }
+        
+        // Just a page name - add wiki prefix and .md extension
+        return `${wikiPath}/${trimmed}.md`;
+    }
+    
+    /**
+     * Open a wiki link (file in vault) - enhanced resolution with fallback strategies
      */
     private async openWikiLink(linkText: string): Promise<void> {
-        const normalizedCacheKey = linkText.trim().toLowerCase();
+        const originalText = linkText.trim();
+        const normalizedCacheKey = originalText.toLowerCase();
 
         // Fast path: cache hit
         if (this.wikiLinkResolutionCache.has(normalizedCacheKey)) {
@@ -394,30 +448,69 @@ export class EnhancedChatView extends ItemView {
                 }
                 this.wikiLinkResolutionCache.delete(normalizedCacheKey);
             } else {
-                new Notice(`File not found: ${linkText}`);
+                new Notice(`File not found: ${originalText}`);
                 return;
             }
         }
 
-        // Try to find the file in the vault
-        // First try exact match with .md extension
-        let filePath = linkText.endsWith('.md') ? linkText : `${linkText}.md`;
+        // Strategy 1: Try exact path match (with or without .md)
+        let filePath = originalText.endsWith('.md') ? originalText : `${originalText}.md`;
         let file = this.app.vault.getAbstractFileByPath(filePath);
         
-        // If not found, try without extension (for files that already have it)
+        // Strategy 2: Try normalized path (add wiki prefix if missing)
         if (!file) {
-            file = this.app.vault.getAbstractFileByPath(linkText);
+            const normalizedPath = this.normalizeWikiLink(originalText);
+            file = this.app.vault.getAbstractFileByPath(normalizedPath);
         }
         
-        // If still not found, search for files with similar names
+        // Strategy 3: Try without extension (for Obsidian native resolution)
+        if (!file) {
+            file = this.app.vault.getAbstractFileByPath(originalText);
+        }
+        
+        // Strategy 4: Use Obsidian's metadata cache for link resolution (handles aliases, basename)
+        if (!file) {
+            const resolved = this.app.metadataCache.getFirstLinkpathDest(originalText, '');
+            if (resolved instanceof TFile) {
+                file = resolved;
+            }
+        }
+        
+        // Strategy 5: Try normalized path with metadata cache
+        if (!file) {
+            const normalizedPath = this.normalizeWikiLink(originalText);
+            const resolved = this.app.metadataCache.getFirstLinkpathDest(normalizedPath.replace(/\.md$/, ''), '');
+            if (resolved instanceof TFile) {
+                file = resolved;
+            }
+        }
+        
+        // Strategy 6: Fallback to fuzzy search by basename
         if (!file) {
             const files = this.app.vault.getMarkdownFiles();
-            const matchingFile = files.find(f => {
+            const wikiPath = this.plugin.settings.wikiPath;
+            
+            // First try to find in wiki directory
+            const wikiFiles = files.filter(f => f.path.startsWith(`${wikiPath}/`));
+            const matchingWikiFile = wikiFiles.find(f => {
                 const basename = f.basename || f.name.replace(/\.md$/, '');
-                return basename === linkText || f.path.includes(linkText);
+                return basename.toLowerCase() === originalText.toLowerCase();
             });
-            if (matchingFile) {
-                file = matchingFile;
+            if (matchingWikiFile) {
+                file = matchingWikiFile;
+            }
+            
+            // Then try broader search
+            if (!file) {
+                const matchingFile = files.find(f => {
+                    const basename = f.basename || f.name.replace(/\.md$/, '');
+                    return basename === originalText || 
+                           basename.toLowerCase() === originalText.toLowerCase() ||
+                           f.path.includes(originalText);
+                });
+                if (matchingFile) {
+                    file = matchingFile;
+                }
             }
         }
         
@@ -428,7 +521,7 @@ export class EnhancedChatView extends ItemView {
             new Notice(`Opened: ${file.path}`);
         } else {
             this.wikiLinkResolutionCache.set(normalizedCacheKey, null);
-            new Notice(`File not found: ${linkText}`);
+            new Notice(`File not found: ${originalText}`);
         }
     }
     
@@ -921,8 +1014,10 @@ You can use the following tools to complete tasks:
 - create_wiki_page: Create Wiki page
 - update_wiki_page: Update Wiki page
 - Read_Summary: Read only the Summary section
+- Batch_Read_Summary: Read Summary sections from multiple pages (up to 50 per call, parallelized for speed)
 - Update_Summary: Modify only the Summary section
 - Read_Property: Read only one frontmatter property
+- Batch_Read_Property: Read one frontmatter property from multiple pages (up to 50 per call, parallelized for speed)
 - Update_Property: Modify only one frontmatter property
 - Update_Content: Modify only the Content section
 - Read_Part: Read only one named section
@@ -932,11 +1027,12 @@ You can use the following tools to complete tasks:
 
 Tool selection rules:
 - Follow this staged retrieval chain for queries:
-    1) Start from candidate pages already available in retrieved context (BM25 sections), explicit wiki links, or known paths.
-    2) For each candidate, call Read_Property first (prefer property: title, tags, related).
-    3) Then call Read_Summary for candidates that match intent.
+    1) Start from candidate pages already available in retrieved context (BM25 sections), explicit wiki links, or known paths. If >50 candidates, split into batches.
+    2) For candidates, call Batch_Read_Property first when possible (max 50 per call; fallback: Read_Property for single pages).
+    3) Then call Batch_Read_Summary for likely matches (max 50 per call; fallback: Read_Summary for single pages).
     4) Call read_file only when summary-level evidence is insufficient.
-- Use search_files only after at least one successful Read_Property call in the current response, and only when candidate paths are still insufficient.
+    5) If batch tools report "exceeds limit", automatically split the request into multiple calls (e.g., first 50, next 50, etc.).
+- Use search_files only after at least one successful Read_Property or Batch_Read_Property call in the current response, and only when candidate paths are still insufficient.
 - Consider relevance high only when title/tags/related or summary clearly match the user intent.
 - If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
 - If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
@@ -947,6 +1043,13 @@ Examples:
 - "Find articles about vector database indexing" -> Read_Property on candidates, then Read_Summary, then read_file only for high-match pages
 - "Read the Related Links section of this page" -> Read_Part with part: "Related Links"
 - "Rewrite only the Content section, keep summary and metadata unchanged" -> Update_Content
+
+Wiki Link Format:
+When referencing wiki pages in your response, ALWAYS use the full path format:
+- Correct: [[${this.plugin.settings.wikiPath}/PageName.md]] or [[${this.plugin.settings.wikiPath}/PageName.md|Display Name]]
+- Incorrect: [[PageName]] or [[PageName.md]] (missing wiki path prefix)
+All wiki pages are stored in the "${this.plugin.settings.wikiPath}/" directory. Always include this prefix in your links.
+Example: To link to a page about Machine Learning, write [[${this.plugin.settings.wikiPath}/Machine-Learning.md]] or [[${this.plugin.settings.wikiPath}/Machine-Learning.md|Machine Learning]]
 
 When you need to use tools, please call the corresponding tool functions.`;
     }
@@ -1343,7 +1446,24 @@ When you need to use tools, please call the corresponding tool functions.`;
         this.addMessage('user', messageText, this.contexts.length > 0 ? [...this.contexts] : undefined);
 
         try {
-            const relevantIndexContext = await this.getRelevantIndexContext(messageText);
+            const currentModelConfig = this.plugin.settings.models.find(
+                m => m.id === this.plugin.settings.currentModelId
+            );
+            const maxCtx = currentModelConfig?.contextLength || this.plugin.settings.maxContextTokens || 8192;
+            const historyTurns = Math.max(
+                1,
+                currentModelConfig?.historyTurns || (maxCtx <= 8192 ? 4 : 10)
+            );
+            const retrievalTopN = Math.max(1, currentModelConfig?.retrievalTopN || DEFAULT_RETRIEVAL_TOP_N);
+            const retrievalRerankTopK = Math.max(
+                1,
+                currentModelConfig?.retrievalRerankTopK || DEFAULT_RETRIEVAL_RERANK_TOP_K
+            );
+            const relevantIndexContext = await this.getRelevantIndexContext(
+                messageText,
+                retrievalTopN,
+                retrievalRerankTopK
+            );
 
             // Build system prompt (including tool descriptions)
             let systemPrompt = this.buildBaseSystemPrompt();
@@ -1361,13 +1481,6 @@ When you need to use tools, please call the corresponding tool functions.`;
             }
 
             // Build message list.
-            // For small-context local models (≤8k tokens), keep fewer turns to leave
-            // room for the system prompt, BM25 context, and tool schemas.
-            const currentModelConfig = this.plugin.settings.models.find(
-                m => m.id === this.plugin.settings.currentModelId
-            );
-            const maxCtx = currentModelConfig?.contextLength || this.plugin.settings.maxContextTokens || 8192;
-            const historyTurns = maxCtx <= 8192 ? 4 : 10;
 
             const recentMessages = this.messages
                 .filter(m => m.role !== 'system')
@@ -1396,59 +1509,111 @@ When you need to use tools, please call the corresponding tool functions.`;
             
             // Check if current model supports tool calls
             let useTools = currentModelConfig?.supportsTools ?? true; // Read from model config, default true
-            
-            // Tool call loop — prevent infinite loops with a reasonable upper bound
-            // Can be configured per model or use a sensible default
-            const maxIterations = currentModelConfig?.maxToolIterations ?? 100; // Configurable, default to 100
-            let iteration = 0;
-            
-            while (iteration < maxIterations) {
-                iteration++;
-                
-                let fullResponse = '';
-                let toolCalls: OllamaToolCall[] = [];
-                
-                try {
-                    // Send streaming request (with tools)
-                    const response = await client.chatStream({
-                        messages, 
-                        onChunk: (chunk: string) => {
-                            fullResponse += chunk;
-                            this.appendToLastMessage(chunk);
-                        },
-                        tools: useTools ? activeTools : undefined, 
-                        systemPrompt,
-                        signal  // Pass abort signal for cancellation
-                    });
 
-                    // Update last message with full content
-                    if (this.messages.length > 0) {
-                        this.messages[this.messages.length - 1].content = fullResponse;
+            const maxIterations = Math.max(
+                1,
+                currentModelConfig?.maxToolIterations || DEFAULT_MAX_TOOL_ITERATIONS
+            );
+            const maxToolCallsPerTurn = Math.max(
+                1,
+                currentModelConfig?.maxToolCallsPerTurn || DEFAULT_MAX_TOOL_CALLS_PER_TURN
+            );
+            const maxToolWallTimeMs = Math.max(
+                1000,
+                currentModelConfig?.maxToolWallTimeMs || DEFAULT_MAX_TOOL_WALL_TIME_MS
+            );
+            const maxContinuationPasses = Math.max(
+                0,
+                currentModelConfig?.maxContinuationPasses ?? DEFAULT_MAX_CONTINUATION_PASSES
+            );
+            const toolResultRatioRaw = currentModelConfig?.maxToolResultCharsRatio ?? DEFAULT_TOOL_RESULT_RATIO;
+            const maxToolResultCharsRatio = Math.max(0.1, Math.min(0.8, toolResultRatioRaw));
+            const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * maxToolResultCharsRatio));
+
+            let remainingIterations = maxIterations;
+            let remainingToolCalls = maxToolCallsPerTurn;
+            let deadlineMs = Date.now() + maxToolWallTimeMs;
+            let continuationPassesUsed = 0;
+            let budgetHitReason: string | null = null;
+            let completedWithoutToolBudgetStop = false;
+
+            while (true) {
+                while (remainingIterations > 0) {
+                    if (Date.now() > deadlineMs) {
+                        budgetHitReason = 'time budget';
+                        break;
                     }
 
-                    // Check if there are tool calls
-                    if (response.message.toolCalls && response.message.toolCalls.length > 0) {
-                        toolCalls = response.message.toolCalls;
+                    remainingIterations--;
+                
+                    let fullResponse = '';
+                    let toolCalls: OllamaToolCall[] = [];
+                
+                    try {
+                        // Mark that we're actively receiving stream content
+                        this.isStreamReceiving = true;
                         
-                        // Display tool call information
-                        for (const toolCall of toolCalls) {
-                            const toolName = toolCall.function.name;
-                            const toolArgs = toolCall.function.arguments;
-                            this.appendToLastMessage(`\n\n🔧 **Calling tool:** \`${toolName}\`\n\`\`\`json\n${JSON.stringify(toolArgs, null, 2)}\n\`\`\`\n`);
+                        // Send streaming request (with tools)
+                        const response = await client.chatStream({
+                            messages, 
+                            onChunk: (chunk: string) => {
+                                fullResponse += chunk;
+                                this.appendToLastMessage(chunk);
+                            },
+                            tools: useTools ? activeTools : undefined, 
+                            systemPrompt,
+                            signal  // Pass abort signal for cancellation
+                        });
+
+                        // Check if there are tool calls
+                        if (!response.message.toolCalls || response.message.toolCalls.length === 0) {
+                            completedWithoutToolBudgetStop = true;
+                            break;
                         }
-                        
-                        // Execute tool calls
-                        const toolResults: OllamaMessage[] = [];
+
+                        toolCalls = response.message.toolCalls;
+                        if (remainingToolCalls <= 0) {
+                            budgetHitReason = 'tool call budget';
+                            break;
+                        }
+
                         for (const toolCall of toolCalls) {
                             const toolName = toolCall.function.name;
                             const toolArgs = toolCall.function.arguments;
-                            
+                            // Display concise tool call info
+                            const toolDisplay = this.formatToolCallDisplay(toolName, toolArgs);
+                            this.appendToLastMessage(`\n\n${toolDisplay}`);
+                        }
+
+                        const executableToolCalls = toolCalls.slice(0, remainingToolCalls);
+                        const skippedToolCalls = toolCalls.slice(remainingToolCalls);
+                        if (skippedToolCalls.length > 0) {
+                            budgetHitReason = 'tool call budget';
+                        }
+
+                        const toolResults: OllamaMessage[] = [];
+                        // Mark that we're in tool execution (pause/interval state)
+                        this.isStreamReceiving = false;
+                        
+                        for (const toolCall of executableToolCalls) {
+                            const toolName = toolCall.function.name;
+                            const toolArgs = toolCall.function.arguments;
+
                             try {
-                                // Build tool context
+                                if (Date.now() > deadlineMs) {
+                                    budgetHitReason = 'time budget';
+                                    toolResults.push({
+                                        role: 'tool',
+                                        content: JSON.stringify({ success: false, error: 'Tool execution stopped: time budget reached' }),
+                                        toolCallId: toolCall.id,
+                                    });
+                                    break;
+                                }
+
                                 const toolContext = {
                                     vault: this.app.vault,
                                     app: this.app,
-                                    settings: this.plugin.settings
+                                    settings: this.plugin.settings,
                                 };
 
                                 const normalizedToolArgs: Record<string, unknown> =
@@ -1457,14 +1622,13 @@ When you need to use tools, please call the corresponding tool functions.`;
                                         : {};
 
                                 if (toolName === 'search_files' && !hasReadPropertyInTurn) {
-                                    const orderError = 'search_files requires staged retrieval. Call Read_Property first in this response.';
+                                    const orderError = 'search_files requires staged retrieval. Call Read_Property or Batch_Read_Property first in this response.';
                                     this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${orderError}`);
 
-                                    // Degrade retrieval for this response to avoid repeated order violations.
                                     if (!searchFilesOrderDegraded) {
                                         searchFilesOrderDegraded = true;
                                         activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
-                                        this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response. Continue with `Read_Property` -> `Read_Summary` -> `read_file` as needed.');
+                                        this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response. Continue with `Batch_Read_Property` -> `Batch_Read_Summary` -> `read_file` as needed.');
                                     }
 
                                     toolResults.push({
@@ -1472,9 +1636,9 @@ When you need to use tools, please call the corresponding tool functions.`;
                                         content: JSON.stringify({
                                             success: false,
                                             error: orderError,
-                                            nextStep: 'Use Read_Property on candidate wiki pages first, then Read_Summary, then read_file if still needed.'
+                                            nextStep: 'Use Batch_Read_Property on candidate wiki pages first, then Batch_Read_Summary, then read_file if still needed.',
                                         }),
-                                        toolCallId: toolCall.id
+                                        toolCallId: toolCall.id,
                                     });
                                     continue;
                                 }
@@ -1482,11 +1646,9 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 if (toolName === 'search_files') {
                                     this.searchFilesCallCount += 1;
                                     if (this.searchFilesCallCount > SEARCH_FILES_CALL_BUDGET) {
-                                        const budgetError = `search_files call budget exceeded (${SEARCH_FILES_CALL_BUDGET} per message). Narrow path scope or use Read_Property/Read_Summary first.`;
+                                        const budgetError = `search_files call budget exceeded (${SEARCH_FILES_CALL_BUDGET} per message). Narrow path scope or use Batch_Read_Property/Batch_Read_Summary first.`;
                                         this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${budgetError}`);
 
-                                        // Degrade retrieval strategy for this turn: disable search_files,
-                                        // keep narrow read tools so the model can still finish the answer.
                                         if (!searchFilesBudgetExceeded) {
                                             searchFilesBudgetExceeded = true;
                                             activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
@@ -1496,7 +1658,7 @@ When you need to use tools, please call the corresponding tool functions.`;
                                         toolResults.push({
                                             role: 'tool',
                                             content: JSON.stringify({ success: false, error: budgetError }),
-                                            toolCallId: toolCall.id
+                                            toolCallId: toolCall.id,
                                         });
                                         continue;
                                     }
@@ -1505,40 +1667,28 @@ When you need to use tools, please call the corresponding tool functions.`;
                                         normalizedToolArgs.maxResults = SEARCH_FILES_DEFAULT_MAX_RESULTS;
                                     }
                                 }
-                                
-                                // Execute tool
-                                const result = await executeTool(toolName, normalizedToolArgs, toolContext);
 
-                                if (toolName === 'Read_Property' && result.success) {
+                                const result = await executeTool(toolName, normalizedToolArgs, toolContext);
+                                remainingToolCalls--;
+
+                                if ((toolName === 'Read_Property' || toolName === 'Batch_Read_Property') && result.success) {
                                     hasReadPropertyInTurn = true;
                                 }
-                                
-                                // Display tool result with markdown formatting
-                                if (result.success) {
-                                    this.appendToLastMessage(`\n✅ **Tool executed successfully**`);
-                                    if (result.data) {
-                                        const dataStr = JSON.stringify(result.data, null, 2);
-                                        // Limit display length
-                                        const displayStr = dataStr.length > 1000 ? dataStr.substring(0, 1000) + '\n... (truncated)' : dataStr;
-                                        this.appendToLastMessage(`\n\n**Result:**\n\`\`\`json\n${displayStr}\n\`\`\``);
-                                    }
-                                } else {
-                                    this.appendToLastMessage(`\n❌ **Tool execution failed:** ${result.error}`);
-                                }
-                                
-                                // Add tool result to message list.
-                                // Truncate large results based on the active model's context window.
-                                // Budget: ~50% of context for tool results (4 chars ≈ 1 token).
-                                const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
+
+                                // Display concise tool result
+                                const resultDisplay = this.formatToolResultDisplay(toolName, result.success, result.data, result.error);
+                                this.appendToLastMessage(` ${resultDisplay}`);
+
                                 let toolResultStr = JSON.stringify(result);
                                 if (toolResultStr.length > maxToolResultChars) {
                                     const truncated = { success: result.success, data: toolResultStr.slice(0, maxToolResultChars) + '…(truncated)' };
                                     toolResultStr = JSON.stringify(truncated);
                                 }
+
                                 toolResults.push({
                                     role: 'tool',
                                     content: toolResultStr,
-                                    toolCallId: toolCall.id
+                                    toolCallId: toolCall.id,
                                 });
                             } catch (error) {
                                 const errorMsg = String(error);
@@ -1546,25 +1696,34 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 toolResults.push({
                                     role: 'tool',
                                     content: JSON.stringify({ success: false, error: errorMsg }),
-                                    toolCallId: toolCall.id
+                                    toolCallId: toolCall.id,
                                 });
                             }
                         }
-                        
-                        // Add assistant message and tool results to message history
+
+                        for (const skippedToolCall of skippedToolCalls) {
+                            toolResults.push({
+                                role: 'tool',
+                                content: JSON.stringify({
+                                    success: false,
+                                    error: 'Tool execution skipped: tool call budget reached',
+                                }),
+                                toolCallId: skippedToolCall.id,
+                            });
+                        }
+
                         messages.push({
                             role: 'assistant',
                             content: fullResponse,
-                            toolCalls: toolCalls
+                            toolCalls,
                         });
                         messages.push(...toolResults);
-                        
-                        // Continue loop, let LLM process tool results
+
+                        if (budgetHitReason) {
+                            break;
+                        }
+
                         continue;
-                    }
-                    
-                    // No tool calls, end loop
-                    break;
                     
                 } catch (error) {
                     const errorMsg = String(error);
@@ -1576,11 +1735,9 @@ When you need to use tools, please call the corresponding tool functions.`;
                         this.appendToLastMessage('\n\n⚠️ Current model may not support tool calls, retrying in normal mode...');
                         
                         // Retry without tools
-                        let retryResponse = '';
                         await client.chatStream({
                             messages, 
                             onChunk: (chunk: string) => {
-                                retryResponse += chunk;
                                 this.appendToLastMessage(chunk);
                             },
                             tools: undefined, // Without tools
@@ -1588,20 +1745,16 @@ When you need to use tools, please call the corresponding tool functions.`;
                             signal  // Pass abort signal for cancellation
                         });
                         
-                        if (this.messages.length > 0) {
-                            this.messages[this.messages.length - 1].content = retryResponse;
-                        }
+                        completedWithoutToolBudgetStop = true;
                         break;
                     }
                     
                     // On other errors, degrade to no-tool mode and still try to complete the response.
                     this.appendToLastMessage(`\n\n⚠️ Tool-call round failed, retrying without tools: ${errorMsg}`);
                     useTools = false;
-                    let retryResponse = '';
                     await client.chatStream({
                         messages,
                         onChunk: (chunk: string) => {
-                            retryResponse += chunk;
                             this.appendToLastMessage(chunk);
                         },
                         tools: undefined,
@@ -1609,15 +1762,39 @@ When you need to use tools, please call the corresponding tool functions.`;
                         signal
                     });
 
-                    if (this.messages.length > 0) {
-                        this.messages[this.messages.length - 1].content = retryResponse;
-                    }
+                    completedWithoutToolBudgetStop = true;
                     break;
                 }
             }
+
+                if (completedWithoutToolBudgetStop) {
+                    break;
+                }
+
+                if (!budgetHitReason && remainingIterations <= 0) {
+                    budgetHitReason = 'iteration budget';
+                }
+
+                if (budgetHitReason && useTools && continuationPassesUsed < maxContinuationPasses) {
+                    continuationPassesUsed++;
+                    const extraIterations = Math.max(2, Math.floor(maxIterations / 2));
+                    const extraToolCalls = Math.max(4, Math.floor(maxToolCallsPerTurn / 2));
+                    const extraWallTimeMs = Math.max(3000, Math.floor(maxToolWallTimeMs / 2));
+                    this.appendToLastMessage(
+                        `\n\n⚠️ Reached ${budgetHitReason}, auto continuation ${continuationPassesUsed}/${maxContinuationPasses}...`
+                    );
+                    remainingIterations += extraIterations;
+                    remainingToolCalls += extraToolCalls;
+                    deadlineMs = Date.now() + extraWallTimeMs;
+                    budgetHitReason = null;
+                    continue;
+                }
+
+                break;
+            }
             
-            if (iteration >= maxIterations) {
-                this.appendToLastMessage('\n\n⚠️ Reached maximum tool call limit');
+            if (!completedWithoutToolBudgetStop && budgetHitReason) {
+                this.appendToLastMessage(`\n\n⚠️ Reached ${budgetHitReason}`);
 
                 // Final no-tool pass: force the model to produce a best-effort answer
                 // from already collected context/tool outputs instead of ending mid-loop.
@@ -1666,9 +1843,14 @@ When you need to use tools, please call the corresponding tool functions.`;
                 this.addMessage('system', `❌ Error: ${error}`);
             }
         } finally {
+            // Clear contexts after sending (selected files are not auto-carried to next message)
+            this.contexts = [];
+            this.renderContextTags();
+            
             // Clean up abort controller
             this.abortController = null;
             this.isLoading = false;
+            this.isStreamReceiving = false;
             // Force a render after loading finishes so loading dots are removed immediately.
             this.renderMessages();
             this.updateSendButton();
@@ -1694,6 +1876,53 @@ When you need to use tools, please call the corresponding tool functions.`;
         });
     }
 
+    /**
+     * Normalize wiki link path for display and resolution.
+     * Ensures LLM-generated links work correctly regardless of format.
+     * Returns the normalized path (for data attribute) and display text.
+     */
+    private normalizeWikiLinkForDisplay(linkPath: string): { normalizedPath: string; displayText: string } {
+        const trimmed = linkPath.trim();
+        const wikiPath = this.plugin.settings.wikiPath;
+        
+        // Extract display name from path (last segment without extension)
+        let displayText = trimmed;
+        if (trimmed.includes('|')) {
+            // Already has display text: [[path|display]]
+            const parts = trimmed.split('|');
+            return { normalizedPath: parts[0].trim(), displayText: parts[1].trim() };
+        }
+        
+        // Remove .md extension for display
+        displayText = trimmed.replace(/\.md$/, '');
+        // Get last path segment for display
+        if (displayText.includes('/')) {
+            displayText = displayText.split('/').pop() || displayText;
+        }
+        
+        // Normalize the path for resolution
+        let normalizedPath = trimmed;
+        
+        // If path doesn't start with wiki path, it might need normalization
+        if (!trimmed.startsWith(`${wikiPath}/`) && !trimmed.startsWith(`${wikiPath}\\`)) {
+            // Check if this looks like a full path already
+            if (trimmed.includes('/') || trimmed.includes('\\')) {
+                // Has path separators but missing wiki prefix - might still resolve
+                normalizedPath = trimmed;
+            } else {
+                // Just a page name - the openWikiLink will try to resolve it
+                normalizedPath = trimmed;
+            }
+        }
+        
+        // Ensure .md extension for consistent resolution
+        if (!normalizedPath.endsWith('.md') && !normalizedPath.includes('#')) {
+            normalizedPath = `${normalizedPath}.md`;
+        }
+        
+        return { normalizedPath, displayText };
+    }
+    
     private renderContent(content: string): string {
         // First, handle code blocks (```language\ncode\n```)
         let result = content;
@@ -1707,10 +1936,15 @@ When you need to use tools, please call the corresponding tool functions.`;
         // Then handle inline code (`code`)
         result = result.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
         
-        // Handle wiki links [[link]] - make them clickable with data attribute
-        result = result.replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, (_, linkText) => {
-            const escapedLink = this.escapeHtml(linkText);
-            return `<span class="wiki-link" data-wiki-link="${escapedLink}">[[${escapedLink}]]</span>`;
+        // Handle wiki links [[link]] or [[link|display]] - normalize and make clickable
+        result = result.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, linkPath, displayOverride) => {
+            const { normalizedPath, displayText } = this.normalizeWikiLinkForDisplay(linkPath);
+            // Use display override if provided in the original link
+            const finalDisplay = displayOverride ? displayOverride.trim() : displayText;
+            const escapedPath = this.escapeHtml(normalizedPath);
+            const escapedDisplay = this.escapeHtml(finalDisplay);
+            // Store normalized path in data attribute, show original format in UI
+            return `<span class="wiki-link" data-wiki-link="${escapedPath}">[[${escapedDisplay}]]</span>`;
         });
         
         // Handle headings (must be at start of line or after newline)
@@ -1898,61 +2132,20 @@ When you need to use tools, please call the corresponding tool functions.`;
         });
     }
 
-    private async getRelevantIndexContext(question: string): Promise<string | null> {
-        // Primary path: BM25 + optional embedding rerank
-        if (this.plugin.getSearchIndexStatus() !== 'ready') {
-            return this.plugin.getSearchIndexStatusMessage();
-        }
-
-        if (this.searchEngine?.isReady()) {
-            try {
-                const top30 = this.searchEngine.search(question, 30);
-                if (top30.length > 0) {
-                    const embedFn = this.buildEmbedFn();
-                    const chunks = await this.searchEngine.rerank(question, top30, embedFn, 10);
-                    if (chunks.length > 0) {
-                        return chunks
-                            .map(c => `### [[${c.path.replace(/\.md$/, '')}|${c.title}]]\n${c.chunk}`)
-                            .join('\n\n---\n\n');
-                    }
-                }
-            } catch (e) {
-                console.warn('[WikiChat] WikiSearchEngine error while preparing retrieval context:', e);
-            }
-        }
-
-        return null;
-    }
-
-    private buildEmbedFn(): ((text: string) => Promise<number[]>) | null {
-        const { currentEmbeddingModelId, embeddingModels } = this.plugin.settings;
-        if (!currentEmbeddingModelId) return null;
-        const cfg = embeddingModels?.find(m => m.id === currentEmbeddingModelId);
-        if (!cfg?.baseUrl || !cfg?.modelId) return null;
-        const meta = getProviderMetadata(cfg.provider);
-        if (meta.apiStyle === 'ollama') {
-            return async (text: string) => {
-                const res = await fetch(`${cfg.baseUrl}/api/embed`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model: cfg.modelId, input: text }),
-                });
-                const json = await res.json();
-                return json.embeddings?.[0] ?? [];
-            };
-        }
-        // OpenAI-compatible
-        return async (text: string) => {
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
-            const res = await fetch(`${cfg.baseUrl}/embeddings`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({ model: cfg.modelId, input: text }),
-            });
-            const json = await res.json();
-            return json.data?.[0]?.embedding ?? [];
-        };
+    private async getRelevantIndexContext(
+        question: string,
+        retrievalTopN: number = DEFAULT_RETRIEVAL_TOP_N,
+        retrievalRerankTopK: number = DEFAULT_RETRIEVAL_RERANK_TOP_K
+    ): Promise<string | null> {
+        return getRelevantIndexContext(
+            this.app,
+            this.plugin.settings,
+            this.searchEngine,
+            this.plugin.getSearchIndexStatus(),
+            question,
+            retrievalTopN,
+            retrievalRerankTopK
+        );
     }
 
     /**
@@ -2008,5 +2201,104 @@ When you need to use tools, please call the corresponding tool functions.`;
         }
         const segments = basePath.split('/');
         return segments[segments.length - 1] || basePath;
+    }
+
+    /**
+     * Format tool call display as concise one-line text
+     */
+    private formatToolCallDisplay(toolName: string, args: Record<string, unknown>): string {
+        const getShortPath = (path: string | unknown): string => {
+            if (typeof path !== 'string') return String(path);
+            const parts = path.split('/');
+            return parts.length > 2 ? '...' + parts.slice(-2).join('/') : path;
+        };
+
+        const toolDisplayMap: Record<string, (a: Record<string, unknown>) => string> = {
+            'read_file': (a) => `📄 Read file: ${getShortPath(a.path)}`,
+            'write_file': (a) => `✏️ Write file: ${getShortPath(a.path)}`,
+            'append_file': (a) => `✏️ Append to: ${getShortPath(a.path)}`,
+            'delete_file': (a) => `🗑️ Delete file: ${getShortPath(a.path)}`,
+            'list_files': (a) => `📁 List files: ${getShortPath(a.path) || 'vault root'}`,
+            'search_files': (a) => `🔍 Search: "${a.pattern}"`,
+            'create_directory': (a) => `📁 Create dir: ${getShortPath(a.path)}`,
+            'create_wiki_page': (a) => `📝 Create wiki: ${getShortPath(a.path)}`,
+            'update_wiki_page': (a) => `✏️ Update wiki: ${getShortPath(a.path)}`,
+            'Read_Summary': (a) => `📖 Read summary of ${getShortPath(a.path)}`,
+            'Batch_Read_Summary': (a) => {
+                const paths = a.paths as string[] | undefined;
+                return `📖 Read summaries: ${paths?.length || 0} pages`;
+            },
+            'Update_Summary': (a) => `✏️ Update summary of ${getShortPath(a.path)}`,
+            'Read_Property': (a) => `📋 Read "${a.property}" from ${getShortPath(a.path)}`,
+            'Batch_Read_Property': (a) => {
+                const paths = a.paths as string[] | undefined;
+                return `📋 Read "${a.property}" from ${paths?.length || 0} pages`;
+            },
+            'Update_Property': (a) => `✏️ Set "${a.property}" on ${getShortPath(a.path)}`,
+            'Update_Content': (a) => `✏️ Update content of ${getShortPath(a.path)}`,
+            'Read_Part': (a) => `📄 Read "${a.part}" from ${getShortPath(a.path)}`,
+            'Update_Part': (a) => `✏️ Update "${a.part}" of ${getShortPath(a.path)}`,
+            'add_backlink': (a) => `🔗 Add backlink: ${getShortPath(a.source)} → ${getShortPath(a.target)}`,
+            'update_index': () => `📑 Update wiki index`,
+        };
+
+        const formatter = toolDisplayMap[toolName];
+        if (formatter) {
+            try {
+                return formatter(args);
+            } catch {
+                return `🔧 ${toolName}`;
+            }
+        }
+        return `🔧 ${toolName}`;
+    }
+
+    /**
+     * Format tool result display as concise one-line text
+     */
+    private formatToolResultDisplay(toolName: string, success: boolean, data: unknown, error?: string): string {
+        if (!success) {
+            return `<span class="tool-log-error">❌ ${error || 'Failed'}</span>`;
+        }
+
+        // For read operations, show brief info
+        if (['Read_Summary', 'Batch_Read_Summary', 'Read_Property', 'Batch_Read_Property', 'Read_Part', 'read_file'].includes(toolName)) {
+            if (typeof data === 'object' && data !== null) {
+                if ('value' in data) {
+                    return `<span class="tool-log-success">✓</span>`;
+                }
+                if ('summaries' in data) {
+                    return `<span class="tool-log-success">✓ ${Array.isArray(data.summaries) ? data.summaries.length : 0} summaries</span>`;
+                }
+                if ('properties' in data) {
+                    return `<span class="tool-log-success">✓ ${Array.isArray(data.properties) ? data.properties.length : 0} results</span>`;
+                }
+                if ('content' in data) {
+                    const content = String(data.content);
+                    const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
+                    return `<span class="tool-log-success">✓ ${preview}</span>`;
+                }
+            }
+        }
+
+        // For write operations
+        if (['write_file', 'append_file', 'update_wiki_page', 'Update_Summary', 'Update_Property', 'Update_Content', 'Update_Part', 'create_wiki_page'].includes(toolName)) {
+            return `<span class="tool-log-success">✓ Done</span>`;
+        }
+
+        // For search operations
+        if (toolName === 'search_files') {
+            if (typeof data === 'object' && data !== null && 'results' in data) {
+                return `<span class="tool-log-success">✓ ${Array.isArray(data.results) ? data.results.length : 0} matches</span>`;
+            }
+        }
+
+        if (toolName === 'list_files') {
+            if (typeof data === 'object' && data !== null && 'files' in data) {
+                return `<span class="tool-log-success">✓ ${Array.isArray(data.files) ? data.files.length : 0} files</span>`;
+            }
+        }
+
+        return `<span class="tool-log-success">✓</span>`;
     }
 }

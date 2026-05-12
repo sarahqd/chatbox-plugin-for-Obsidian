@@ -349,6 +349,23 @@ function formatWikiBodyFromMainContent(mainContent: string): string {
     return `## Content\n\n${normalized}\n`;
 }
 
+/**
+ * Vault read with per-path timeout protection
+ * Prevents slow files from blocking batch operations
+ */
+async function readWikiPageWithTimeout(
+    vault: any,
+    path: string,
+    timeoutMs: number = 5000
+): Promise<{ file: TFile; frontmatter: WikiPageFrontmatter; body: string } | { error: string }> {
+    return Promise.race([
+        readWikiPage(vault, path),
+        new Promise<{ file: TFile; frontmatter: WikiPageFrontmatter; body: string } | { error: string }>((_, reject) => {
+            setTimeout(() => reject(new Error(`Timeout reading ${path} after ${timeoutMs}ms`)), timeoutMs);
+        })
+    ]).catch(error => ({ error: String(error) }));
+}
+
 async function readWikiPage(
     vault: any,
     path: string
@@ -869,7 +886,7 @@ export const updateWikiPageTool: ToolDefinition = {
 
 export const readSummaryTool: ToolDefinition = {
     name: 'Read_Summary',
-    description: 'Read only the Summary section from a Wiki page',
+    description: 'Read only the Summary from a Wiki page frontmatter. Returns summary: null if not found.',
     parameters: {
         type: 'object',
         properties: {
@@ -890,21 +907,83 @@ export const readSummaryTool: ToolDefinition = {
                 return { success: false, error: page.error };
             }
 
-            const section = findSection(page.body, 'Summary');
-            if (!section) {
-                return { success: false, error: 'Summary section not found' };
-            }
+            // Read summary directly from frontmatter property (already parsed)
+            // Return null instead of error when summary doesn't exist - this is recoverable
+            const summary = page.frontmatter.summary || null;
 
             return {
                 success: true,
                 data: {
                     path,
-                    summary: section.content.trim(),
+                    summary,
                 },
             };
         } catch (error) {
             return { success: false, error: String(error) };
         }
+    },
+};
+
+export const batchReadSummaryTool: ToolDefinition = {
+    name: 'Batch_Read_Summary',
+    description: 'Read Summary from multiple Wiki pages (up to 50) in one call with parallelization. Returns summary: null for pages without a summary field.',
+    parameters: {
+        type: 'object',
+        properties: {
+            paths: {
+                type: 'array',
+                description: 'Array of Wiki page paths (max 50)',
+            },
+        },
+        required: ['paths'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const rawPaths = params.paths;
+        if (!Array.isArray(rawPaths) || rawPaths.length === 0) {
+            return { success: false, error: 'paths must be a non-empty array' };
+        }
+
+        // Enforce batch size limit
+        const MAX_BATCH_SIZE = 50;
+        if (rawPaths.length > MAX_BATCH_SIZE) {
+            return { success: false, error: `Batch size ${rawPaths.length} exceeds limit of ${MAX_BATCH_SIZE}. Split into smaller batches.` };
+        }
+
+        // Process paths in parallel with timeout protection
+        const resultPromises = rawPaths.map(async (rawPath: unknown) => {
+            const path = normalizePath(String(rawPath || ''));
+            if (!path) {
+                return { path: '', success: false, error: 'empty path' };
+            }
+
+            try {
+                const page = await readWikiPageWithTimeout(vault, path, 5000);
+                if ('error' in page) {
+                    return { path, success: false, error: page.error };
+                }
+
+                // Read summary directly from frontmatter property (already parsed, zero body I/O)
+                // Return null instead of error when summary doesn't exist - this is recoverable
+                const summary = page.frontmatter.summary || null;
+
+                return { path, success: true, summary };
+            } catch (error) {
+                return { path, success: false, error: String(error) };
+            }
+        });
+
+        const results = await Promise.all(resultPromises);
+
+        return {
+            success: true,
+            data: {
+                total: results.length,
+                succeeded: results.filter((item) => item.success).length,
+                failed: results.filter((item) => !item.success).length,
+                results,
+            },
+        };
     },
 };
 
@@ -993,6 +1072,77 @@ export const readPropertyTool: ToolDefinition = {
         } catch (error) {
             return { success: false, error: String(error) };
         }
+    },
+};
+
+export const batchReadPropertyTool: ToolDefinition = {
+    name: 'Batch_Read_Property',
+    description: 'Read one frontmatter property from multiple Wiki pages (up to 50) in one call with parallelization',
+    parameters: {
+        type: 'object',
+        properties: {
+            paths: {
+                type: 'array',
+                description: 'Array of Wiki page paths (max 50)',
+            },
+            property: {
+                type: 'string',
+                description: 'Frontmatter property name: title, created, updated, tags, or related',
+                enum: [...wikiPropertyNames],
+            },
+        },
+        required: ['paths', 'property'],
+    },
+    handler: async (params, context: ToolContext): Promise<ToolResult> => {
+        const vault = context.vault as any;
+        const rawPaths = params.paths;
+        const property = String(params.property || '');
+
+        if (!isWikiPropertyName(property)) {
+            return { success: false, error: `Unsupported property: ${property}` };
+        }
+
+        if (!Array.isArray(rawPaths) || rawPaths.length === 0) {
+            return { success: false, error: 'paths must be a non-empty array' };
+        }
+
+        // Enforce batch size limit
+        const MAX_BATCH_SIZE = 50;
+        if (rawPaths.length > MAX_BATCH_SIZE) {
+            return { success: false, error: `Batch size ${rawPaths.length} exceeds limit of ${MAX_BATCH_SIZE}. Split into smaller batches.` };
+        }
+
+        // Process paths in parallel with timeout protection
+        const resultPromises = rawPaths.map(async (rawPath: unknown) => {
+            const path = normalizePath(String(rawPath || ''));
+            if (!path) {
+                return { path: '', success: false, error: 'empty path' };
+            }
+
+            try {
+                const page = await readWikiPageWithTimeout(vault, path, 5000);
+                if ('error' in page) {
+                    return { path, success: false, error: page.error };
+                }
+
+                return { path, success: true, value: page.frontmatter[property] };
+            } catch (error) {
+                return { path, success: false, error: String(error) };
+            }
+        });
+
+        const results = await Promise.all(resultPromises);
+
+        return {
+            success: true,
+            data: {
+                property,
+                total: results.length,
+                succeeded: results.filter((item) => item.success).length,
+                failed: results.filter((item) => !item.success).length,
+                results,
+            },
+        };
     },
 };
 
@@ -1519,8 +1669,10 @@ export const wikiTools: ToolDefinition[] = [
     createWikiPageTool,
     updateWikiPageTool,
     readSummaryTool,
+    batchReadSummaryTool,
     updateSummaryTool,
     readPropertyTool,
+    batchReadPropertyTool,
     updatePropertyTool,
     updateContentTool,
     readPartTool,

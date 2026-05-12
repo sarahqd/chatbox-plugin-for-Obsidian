@@ -1,22 +1,81 @@
 /**
  * Query Flow
- * Semantic query against the Wiki knowledge base
+ * Wiki retrieval with BM25 + optional embedding rerank
  */
 
 import { App, TFile } from 'obsidian';
-import type { LLMWikiSettings, OllamaMessage, ToolContext, QueryResult, SearchIndexStatus } from '../types';
-import { getLLMClient } from '../llm/client';
-import { executeTool, getOllamaTools, getQueryTools } from '../tools';
-import type { WikiSearchEngine } from '../search/WikiSearchEngine';
+import type { LLMWikiSettings, SearchIndexStatus, EmbeddingModelConfig } from '../types';
+import { getProviderMetadata } from '../types';
+import type { WikiSearchEngine, SearchResult, ChunkResult } from '../search/WikiSearchEngine';
 
-// Maximum characters per tool result is computed dynamically from the active model's
-// context window �?see maxToolResultChars inside queryWiki().
+const DEFAULT_RETRIEVAL_TOP_N = 20;
+const DEFAULT_RETRIEVAL_RERANK_TOP_K = 8;
 
-// Compact system prompt (~50 tokens) �?keeps local model context budget low.
-// Workflow rules are embedded in the user message instead.
-const SYSTEM_PROMPT = `You are a Wiki query assistant. Answer ONLY from content found in the Wiki. Never use external knowledge or make inferences beyond what is explicitly stated. Cite every fact as [[page-name]]. If the Wiki lacks relevant information, state that clearly. Output in Markdown.`;
+/**
+ * Build embedding function from settings.
+ * Returns null if no embedding model is configured.
+ */
+export function buildEmbedFn(
+    settings: LLMWikiSettings
+): ((text: string) => Promise<number[]>) | null {
+    const { currentEmbeddingModelId, embeddingModels } = settings;
+    if (!currentEmbeddingModelId) return null;
+    
+    const cfg = embeddingModels?.find(m => m.id === currentEmbeddingModelId);
+    if (!cfg?.baseUrl || !cfg?.modelId) return null;
+    
+    const meta = getProviderMetadata(cfg.provider);
+    
+    if (meta.apiStyle === 'ollama') {
+        return async (text: string) => {
+            try {
+                const res = await fetch(`${cfg.baseUrl}/api/embed`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: cfg.modelId, input: text }),
+                });
+                if (!res.ok) return [];
+                const json = await res.json();
+                return json.embeddings?.[0] ?? [];
+            } catch {
+                return [];
+            }
+        };
+    }
+    
+    // OpenAI-compatible
+    return async (text: string) => {
+        try {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (cfg.apiKey) headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+            const res = await fetch(`${cfg.baseUrl}/embeddings`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ model: cfg.modelId, input: text }),
+            });
+            if (!res.ok) return [];
+            const json = await res.json();
+            return json.data?.[0]?.embedding ?? [];
+        } catch {
+            return [];
+        }
+    };
+}
 
-function getDegradedRetrievalContext(status: SearchIndexStatus): string {
+/**
+ * Check if embedding model is configured.
+ */
+export function hasEmbeddingModel(settings: LLMWikiSettings): boolean {
+    const { currentEmbeddingModelId, embeddingModels } = settings;
+    if (!currentEmbeddingModelId) return false;
+    const cfg = embeddingModels?.find(m => m.id === currentEmbeddingModelId);
+    return !!(cfg?.baseUrl && cfg?.modelId);
+}
+
+/**
+ * Get degraded retrieval context message based on index status.
+ */
+export function getDegradedRetrievalContext(status: SearchIndexStatus): string {
     if (status === 'building') {
         return 'Search index is rebuilding; no preloaded wiki context is available yet. Use read-only tools if a specific page is needed.';
     }
@@ -29,16 +88,294 @@ function getDegradedRetrievalContext(status: SearchIndexStatus): string {
 }
 
 /**
- * Build a compact context block from BM25 search results.
- * Pre-fetches Read_Summary I/O for each candidate (no LLM call) so the model
- * can answer in a single pass without tool calls for most queries.
+ * Extract best content chunk matching query terms.
+ * Reused from WikiSearchEngine for parallel chunk extraction.
  */
-async function buildBM25Context(
+function extractBestChunk(content: string, queryTerms: string[]): string {
+    const body = content.replace(/^---[\s\S]*?---\n/, '');
+    const sections = body.split(/(?=^## .+)/m);
+    if (sections.length === 0) {
+        return truncateWords(body, 600);
+    }
+
+    const termSet = new Set(queryTerms.map(t => t.toLowerCase()));
+    let bestSection = sections[0];
+    let bestOverlap = -1;
+
+    for (const section of sections) {
+        const sectionTerms = tokenize(section);
+        let overlap = 0;
+        for (const term of sectionTerms) {
+            if (termSet.has(term)) {
+                overlap++;
+            }
+        }
+
+        if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestSection = section;
+        }
+    }
+
+    return truncateWords(bestSection.trim(), 600);
+}
+
+function tokenize(text: string): string[] {
+    const matches = text.match(/[A-Za-z0-9\u4e00-\u9fa5]+/g);
+    if (!matches) return [];
+    return matches.map(token => token.toLowerCase()).filter(token => token.length >= 2);
+}
+
+function truncateWords(text: string, maxWords: number): string {
+    const words = text.split(/\s+/);
+    if (words.length <= maxWords) return text;
+    return words.slice(0, maxWords).join(' ') + '...';
+}
+
+/**
+ * Parallel chunk extraction for topK candidates.
+ * Reads files concurrently and extracts best matching sections.
+ */
+async function extractChunksParallel(
+    app: App,
+    candidates: SearchResult[],
+    queryTerms: string[]
+): Promise<ChunkResult[]> {
+    const results = await Promise.all(
+        candidates.map(async (candidate) => {
+            let chunk = candidate.summary || '';
+            try {
+                const file = app.vault.getAbstractFileByPath(candidate.path);
+                if (file instanceof TFile) {
+                    const content = await app.vault.read(file);
+                    chunk = extractBestChunk(content, queryTerms);
+                }
+            } catch {
+                // Keep summary fallback
+            }
+            return {
+                path: candidate.path,
+                title: candidate.title,
+                chunk,
+                score: candidate.bm25,
+            };
+        })
+    );
+    return results;
+}
+
+/**
+ * Retrieval diagnostics interface for logging and debugging.
+ */
+export interface RetrievalDiagnostics {
+    /** Timestamp of retrieval */
+    timestamp: number;
+    /** Original query */
+    query: string;
+    /** Tokenized query terms */
+    queryTerms: string[];
+    /** Index status at retrieval time */
+    indexStatus: SearchIndexStatus;
+    /** Whether search engine was ready */
+    searchEngineReady: boolean;
+    /** BM25 search results count */
+    bm25ResultCount: number;
+    /** Whether embedding model is configured */
+    embeddingConfigured: boolean;
+    /** Embedding model ID (if configured) */
+    embeddingModelId?: string;
+    /** Whether embedding was successfully computed for query */
+    queryEmbeddingSuccess?: boolean;
+    /** Query embedding vector dimension */
+    queryEmbeddingDim?: number;
+    /** Number of candidates sent to rerank */
+    rerankCandidateCount?: number;
+    /** Final chunk count after rerank */
+    rerankResultCount?: number;
+    /** Any errors encountered */
+    errors: string[];
+    /** Total retrieval time in ms */
+    retrievalTimeMs: number;
+}
+
+/** Global diagnostics store for UI access */
+let lastDiagnostics: RetrievalDiagnostics | null = null;
+
+/**
+ * Get the last retrieval diagnostics.
+ */
+export function getLastRetrievalDiagnostics(): RetrievalDiagnostics | null {
+    return lastDiagnostics;
+}
+
+/**
+ * Retrieve relevant wiki context with BM25 + optional embedding rerank.
+ * 
+ * Flow:
+ * 1. If embedding model configured: BM25 search → Embedding rerank → Parallel chunk extraction
+ * 2. If no embedding model: BM25 search → Parallel chunk extraction
+ * 
+ * @returns Formatted context string or null if no results
+ */
+export async function getRelevantIndexContext(
+    app: App,
+    settings: LLMWikiSettings,
+    searchEngine: WikiSearchEngine | null,
+    searchIndexStatus: SearchIndexStatus,
+    question: string,
+    retrievalTopN: number = DEFAULT_RETRIEVAL_TOP_N,
+    retrievalRerankTopK: number = DEFAULT_RETRIEVAL_RERANK_TOP_K
+): Promise<string | null> {
+    const startTime = Date.now();
+    
+    // Initialize diagnostics
+    const diagnostics: RetrievalDiagnostics = {
+        timestamp: startTime,
+        query: question,
+        queryTerms: [],
+        indexStatus: searchIndexStatus,
+        searchEngineReady: searchEngine?.isReady() ?? false,
+        bm25ResultCount: 0,
+        bm25TopResults: [],
+        embeddingConfigured: false,
+        errors: [],
+        retrievalTimeMs: 0,
+    };
+    
+    // Check index status
+    if (searchIndexStatus !== 'ready') {
+        diagnostics.errors.push(`Index not ready: ${searchIndexStatus}`);
+        lastDiagnostics = diagnostics;
+        diagnostics.retrievalTimeMs = Date.now() - startTime;
+        console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+        return getDegradedRetrievalContext(searchIndexStatus);
+    }
+
+    if (!searchEngine?.isReady()) {
+        diagnostics.errors.push('Search engine not ready');
+        lastDiagnostics = diagnostics;
+        diagnostics.retrievalTimeMs = Date.now() - startTime;
+        console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+        return null;
+    }
+
+    try {
+        // Step 1: BM25 search
+        const queryTerms = tokenize(question);
+        diagnostics.queryTerms = queryTerms;
+        
+        const topResults = searchEngine.search(question, retrievalTopN);
+        diagnostics.bm25ResultCount = topResults.length;
+        diagnostics.bm25TopResults = topResults.slice(0, 5).map(r => ({
+            path: r.path,
+            title: r.title,
+            bm25: Math.round(r.bm25 * 100) / 100,
+        }));
+
+        console.log(`[WikiChat] BM25 search: "${question}" → ${topResults.length} results (topN=${retrievalTopN})`);
+        if (topResults.length === 0) {
+            diagnostics.errors.push('BM25 returned no results');
+            lastDiagnostics = diagnostics;
+            diagnostics.retrievalTimeMs = Date.now() - startTime;
+            console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+            return null;
+        }
+
+        // Step 2: Check if embedding model is configured
+        const embedFn = buildEmbedFn(settings);
+        const { currentEmbeddingModelId, embeddingModels } = settings;
+        const embeddingCfg = embeddingModels?.find(m => m.id === currentEmbeddingModelId);
+        
+        diagnostics.embeddingConfigured = !!embedFn;
+        if (embeddingCfg) {
+            diagnostics.embeddingModelId = embeddingCfg.modelId;
+        }
+
+        let chunks: ChunkResult[];
+
+        if (embedFn) {
+            console.log(`[WikiChat] Embedding model configured: ${embeddingCfg?.modelId} (${embeddingCfg?.provider})`);
+            
+            // Test query embedding
+            const queryVec = await embedFn(question);
+            diagnostics.queryEmbeddingSuccess = queryVec.length > 0;
+            diagnostics.queryEmbeddingDim = queryVec.length;
+            
+            if (queryVec.length === 0) {
+                diagnostics.errors.push('Query embedding failed (empty vector returned)');
+                console.warn('[WikiChat] Query embedding failed, falling back to BM25-only');
+            } else {
+                console.log(`[WikiChat] Query embedding success: dim=${queryVec.length}`);
+            }
+            
+            diagnostics.rerankCandidateCount = Math.min(topResults.length, retrievalTopN);
+            
+            // With embedding: use WikiSearchEngine.rerank (handles embedding + chunk extraction)
+            chunks = await searchEngine.rerank(
+                question,
+                topResults,
+                embedFn,
+                retrievalRerankTopK
+            );
+
+            diagnostics.rerankResultCount = chunks.length;
+            diagnostics.rerankTopResults = chunks.slice(0, 5).map(c => ({
+                path: c.path,
+                title: c.title,
+                score: Math.round(c.score * 100) / 100,
+            }));
+            
+            console.log(`[WikiChat] Rerank complete: ${chunks.length} chunks (topK=${retrievalRerankTopK})`);
+        } else {
+            console.log('[WikiChat] No embedding model configured, using BM25-only mode');
+            // Without embedding: parallel chunk extraction from top BM25 results
+            const topCandidates = topResults.slice(0, retrievalRerankTopK);
+            chunks = await extractChunksParallel(app, topCandidates, queryTerms);
+            
+            console.log(`[WikiChat] BM25-only extraction: ${chunks.length} chunks`);
+        }
+
+        if (chunks.length === 0) {
+            diagnostics.errors.push('No chunks extracted');
+            lastDiagnostics = diagnostics;
+            diagnostics.retrievalTimeMs = Date.now() - startTime;
+            console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+            return null;
+        }
+
+        // Format output
+        const result = chunks
+            .map(c => `### [[${c.path.replace(/\.md$/, '')}|${c.title}]]\n${c.chunk}`)
+            .join('\n\n---\n\n');
+        
+        diagnostics.retrievalTimeMs = Date.now() - startTime;
+        lastDiagnostics = diagnostics;
+        
+        console.log(`[WikiChat] Retrieval complete in ${diagnostics.retrievalTimeMs}ms`);
+        console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+        
+        return result;
+    } catch (e) {
+        const errorMsg = e instanceof Error ? e.message : String(e);
+        diagnostics.errors.push(`Exception: ${errorMsg}`);
+        diagnostics.retrievalTimeMs = Date.now() - startTime;
+        lastDiagnostics = diagnostics;
+        console.warn('[WikiChat] Retrieval error:', e);
+        console.log('[WikiChat Retrieval Diagnostics]', JSON.stringify(diagnostics, null, 2));
+        return null;
+    }
+}
+
+/**
+ * Build BM25 context from search results (lightweight version for queryWiki).
+ * Pre-fetches summaries in parallel.
+ */
+export async function buildBM25Context(
     app: App,
     settings: LLMWikiSettings,
     question: string,
     searchEngine: WikiSearchEngine,
-    topN = 8
+    topN: number = DEFAULT_RETRIEVAL_RERANK_TOP_K
 ): Promise<{ contextText: string; sources: string[] }> {
     const results = searchEngine.search(question, topN);
     if (results.length === 0) {
@@ -48,7 +385,7 @@ async function buildBM25Context(
     const sources: string[] = [];
     const lines: string[] = [];
 
-    // Fetch summaries for all results in parallel (I/O only, no LLM).
+    // Fetch summaries for all results in parallel
     const summaries = await Promise.all(
         results.map(async (result) => {
             if (result.summary) return result.summary;
@@ -59,7 +396,9 @@ async function buildBM25Context(
                     const m = raw.match(/^## Summary\s*\n([\s\S]*?)(?=^##|\z)/m);
                     return m ? m[1].replace(/\s+/g, ' ').trim() : '';
                 }
-            } catch (_) { /* ignore read errors */ }
+            } catch {
+                // ignore read errors
+            }
             return '';
         })
     );
@@ -77,236 +416,4 @@ async function buildBM25Context(
     }
 
     return { contextText: lines.join('\n'), sources };
-}
-
-/**
- * Query the Wiki knowledge base.
- *
- * @param searchEngine  Optional pre-built WikiSearchEngine (BM25 in-memory index).
- *                      When provided, replaces the slow index.md full-file read with
- *                      an O(1) in-memory BM25 search �?critical for 10k+ document wikis.
- */
-export async function queryWiki(
-    app: App,
-    settings: LLMWikiSettings,
-    question: string,
-    onChunk?: (text: string) => void,
-    searchEngine?: WikiSearchEngine,
-    searchIndexStatus: SearchIndexStatus = searchEngine?.isReady() ? 'ready' : 'idle'
-): Promise<QueryResult> {
-    const client = getLLMClient(settings);
-    const context: ToolContext = {
-        vault: app.vault,
-        app,
-        settings,
-    };
-
-    try {
-        let retrievalContext = '';
-        let preFetchedSources: string[] = [];
-
-        if (searchEngine?.isReady()) {
-            // Fast path: BM25 in-memory search + pre-fetch summaries (zero LLM tokens wasted).
-            const { contextText, sources } = await buildBM25Context(app, settings, question, searchEngine);
-            retrievalContext = contextText;
-            preFetchedSources = sources;
-        } else {
-            retrievalContext = getDegradedRetrievalContext(searchIndexStatus);
-        }
-
-        // Build initial message �?workflow rules are here to keep the system prompt short.
-        const messages: OllamaMessage[] = [
-            {
-                role: 'user',
-                content: `Answer the following question using ONLY the Wiki content below.
-If the provided context is sufficient, answer directly without calling any tools.
-Only use Read_Summary or read_file if a specific page not shown below is clearly needed.
-
-## Question
-${question}
-
-## Retrieved Wiki Context (BM25 ranked)
-${retrievalContext}`,
-            },
-        ];
-
-        // Run agentic loop �?capped at 2 iterations for local model budget.
-        // Most queries answer in 0 tool calls when BM25 context is pre-loaded.
-        // Compute per-call tool result budget from current model's context window.
-        const activeModel = settings.models.find(m => m.id === settings.currentModelId);
-        const maxCtx = activeModel?.contextLength || settings.maxContextTokens || 8192;
-        const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
-        const tools = getQueryTools();
-        let response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
-        let iterations = 0;
-        const maxIterations = 2;
-        const sources: string[] = [...preFetchedSources];
-
-        while (iterations < maxIterations) {
-            iterations++;
-
-            if (response.toolCalls && response.toolCalls.length > 0) {
-                // Push assistant message once before executing tool calls (not per-call).
-                messages.push({
-                    role: 'assistant',
-                    content: '',
-                    toolCalls: response.toolCalls,
-                });
-
-                // Execute all tool calls in parallel �?all query tools are read-only.
-                const toolResults = await Promise.all(
-                    response.toolCalls.map(async (tc) => {
-                        try {
-                            return await executeTool(tc.function.name, tc.function.arguments, context);
-                        } catch (error) {
-                            return { success: false, error: String(error) };
-                        }
-                    })
-                );
-
-                for (let i = 0; i < response.toolCalls.length; i++) {
-                    const toolCall = response.toolCalls[i];
-                    const result = toolResults[i];
-
-                    // Track which pages were read
-                    if (
-                        toolCall.function.name === 'read_file' ||
-                        toolCall.function.name === 'Read_Property' ||
-                        toolCall.function.name === 'Read_Summary' ||
-                        toolCall.function.name === 'Read_Part'
-                    ) {
-                        const path = toolCall.function.arguments.path as string;
-                        if (path && path.startsWith(settings.wikiPath) && !sources.includes(path)) {
-                            sources.push(path);
-                        }
-                    }
-
-                    // Truncate large tool results to prevent context overflow on small models.
-                    let resultStr = JSON.stringify(result);
-                    if (resultStr.length > maxToolResultChars) {
-                        const truncated = { ...result, data: resultStr.slice(0, maxToolResultChars) + '�?truncated)' };
-                        resultStr = JSON.stringify(truncated);
-                    }
-
-                    messages.push({
-                        role: 'tool',
-                        content: resultStr,
-                        toolCallId: toolCall.id,
-                    });
-                }
-
-                response = (await client.chat({ messages, tools, systemPrompt: SYSTEM_PROMPT })).message;
-            } else {
-                break;
-            }
-        }
-
-        // Stream the final response if callback provided
-        if (onChunk && response.content) {
-            onChunk(response.content);
-        }
-
-        // Extract page titles from source paths
-        const sourceTitles = sources.map((path) => {
-            const match = path.match(/([^/]+)\.md$/);
-            return match ? match[1] : path;
-        });
-
-        return {
-            answer: response.content || 'Unable to generate answer',
-            sources: sourceTitles,
-            confidence: sources.length > 0 ? 0.8 : 0.3,
-        };
-    } catch (error) {
-        return {
-            answer: `Query failed: ${error}`,
-            sources: [],
-            confidence: 0,
-        };
-    }
-}
-
-/**
- * Chat with the Wiki in streaming mode
- */
-export async function chatWiki(
-    app: App,
-    settings: LLMWikiSettings,
-    messages: OllamaMessage[],
-    onChunk: (text: string) => void,
-    contextPrompt?: string
-): Promise<string> {
-    const client = getLLMClient(settings);
-    const context: ToolContext = {
-        vault: app.vault,
-        app,
-        settings,
-    };
-
-    try {
-        const tools = getOllamaTools();
-        const systemPrompt = contextPrompt ? `${contextPrompt}\n\n${SYSTEM_PROMPT}` : SYSTEM_PROMPT;
-        let response = (await client.chatStream({
-            messages,
-            onChunk,
-            tools,
-            systemPrompt,
-        })).message;
-        let iterations = 0;
-        const maxIterations = 5;
-        const activeModel = settings.models.find(m => m.id === settings.currentModelId);
-        const maxCtx = activeModel?.contextLength || settings.maxContextTokens || 8192;
-        const maxToolResultChars = Math.max(1000, Math.floor(maxCtx * 4 * 0.5));
-
-        while (iterations < maxIterations) {
-            iterations++;
-
-            if (response.toolCalls && response.toolCalls.length > 0) {
-                // Push assistant message once before executing tool calls (not per-call).
-                messages.push({
-                    role: 'assistant',
-                    content: '',
-                    toolCalls: response.toolCalls,
-                });
-
-                // Execute all tool calls in parallel.
-                const toolResults = await Promise.all(
-                    response.toolCalls.map(async (tc) => {
-                        try {
-                            return await executeTool(tc.function.name, tc.function.arguments, context);
-                        } catch (error) {
-                            return { success: false, error: String(error) };
-                        }
-                    })
-                );
-
-                for (let i = 0; i < response.toolCalls.length; i++) {
-                    const toolCall = response.toolCalls[i];
-                    let resultStr = JSON.stringify(toolResults[i]);
-                    if (resultStr.length > maxToolResultChars) {
-                        const truncated = { ...toolResults[i], data: resultStr.slice(0, maxToolResultChars) + '�?truncated)' };
-                        resultStr = JSON.stringify(truncated);
-                    }
-                    messages.push({
-                        role: 'tool',
-                        content: resultStr,
-                        toolCallId: toolCall.id,
-                    });
-                }
-
-                response = (await client.chatStream({
-                    messages,
-                    onChunk,
-                    tools,
-                    systemPrompt,
-                })).message;
-            } else {
-                break;
-            }
-        }
-
-        return response.content;
-    } catch (error) {
-        return `Conversation failed: ${error}`;
-    }
 }

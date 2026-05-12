@@ -425,13 +425,66 @@ export class WikiSearchEngine {
     }
 }
 
+/**
+ * Tokenize text for BM25 indexing/searching.
+ * 
+ * For Chinese text, we use a hybrid approach:
+ * 1. Whole words (continuous Chinese characters) as tokens
+ * 2. Bigrams (2-character sliding window) for partial matching
+ */
 function tokenize(text: string): string[] {
-    const matches = text.match(/[A-Za-z0-9\u4e00-\u9fa5]+/g);
+    const tokens: string[] = [];
+    const seen = new Set<string>();
+    
+    // Match continuous sequences of same character type
+    const matches = text.match(/[A-Za-z0-9]+|[\u4e00-\u9fa5]+/g);
     if (!matches) {
         return [];
     }
 
-    return matches.map((token) => token.toLowerCase()).filter((token) => token.length >= 2);
+    for (const match of matches) {
+        const lower = match.toLowerCase();
+        
+        // Check if this is a Chinese sequence
+        const isChinese = /^[\u4e00-\u9fa5]+$/.test(match);
+        
+        if (isChinese) {
+            // For Chinese: add whole word + bigrams
+            if (lower.length >= 2) {
+                // Add whole word as token (for exact match)
+                if (!seen.has(lower)) {
+                    tokens.push(lower);
+                    seen.add(lower);
+                }
+                
+                // Add bigrams (2-char sliding window) for partial matching
+                for (let i = 0; i < lower.length - 1; i++) {
+                    const bigram = lower.slice(i, i + 2);
+                    if (!seen.has(bigram)) {
+                        tokens.push(bigram);
+                        seen.add(bigram);
+                    }
+                }
+                
+                // Add trigrams for better phrase matching
+                for (let i = 0; i < lower.length - 2; i++) {
+                    const trigram = lower.slice(i, i + 3);
+                    if (!seen.has(trigram)) {
+                        tokens.push(trigram);
+                        seen.add(trigram);
+                    }
+                }
+            }
+        } else {
+            // For non-Chinese (English, numbers): add as single token
+            if (lower.length >= 2 && !seen.has(lower)) {
+                tokens.push(lower);
+                seen.add(lower);
+            }
+        }
+    }
+
+    return tokens;
 }
 
 function tfMap(tokens: string[]): Map<string, number> {

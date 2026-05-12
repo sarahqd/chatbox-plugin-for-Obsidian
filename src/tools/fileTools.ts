@@ -211,7 +211,7 @@ export const listFilesTool: ToolDefinition = {
  */
 export const searchFilesTool: ToolDefinition = {
     name: 'search_files',
-    description: 'Search for text content in files',
+    description: 'Full-text search in Wiki files - ONLY use as last resort after Batch_Read_Property/Batch_Read_Summary have been tried and found insufficient',
     parameters: {
         type: 'object',
         properties: {

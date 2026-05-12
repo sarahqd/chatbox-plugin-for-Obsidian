@@ -8,7 +8,6 @@ import type { LLMWikiSettings, LLMProvider, ModelConfig, EmbeddingModelConfig, S
 import { DEFAULT_SETTINGS, PROVIDER_CATALOG, getProviderMetadata } from './types';
 import { getLLMClient, resetLLMClient } from './llm/client';
 import { ingestFile, ingestContent, ingestFiles } from './flows/ingest';
-import { queryWiki } from './flows/query';
 import { lintWiki } from './flows/lint';
 import { EnhancedChatView } from './chat/EnhancedChatView';
 import { WikiSearchEngine } from './search/WikiSearchEngine';
@@ -34,6 +33,174 @@ export default class LLMWikiPlugin extends Plugin {
     private autoIngestEventRefs: EventRef[] = [];
     private autoIngestQueue = new Set<string>();
     private isIngestRunning = false;
+
+    private extractExtensionFromPath(path: string): string {
+        const fileName = normalizePath(path).split('/').pop() || '';
+        const index = fileName.lastIndexOf('.');
+        if (index <= 0 || index === fileName.length - 1) {
+            return '';
+        }
+        return fileName.slice(index + 1).toLowerCase();
+    }
+
+    private shouldAutoIngestPath(path: string, extension?: string): boolean {
+        const sourcesRoot = normalizePath(this.settings.sourcesPath);
+        const normalizedPath = normalizePath(path);
+        const sourcePrefix = `${sourcesRoot}/`;
+        const chatHistoryMetaPath = normalizePath(`${this.settings.chatHistoryPath}/history.json`);
+
+        const normalizedSourcesRoot = sourcesRoot.toLowerCase();
+        const normalizedPathLower = normalizedPath.toLowerCase();
+        const sourcePrefixLower = sourcePrefix.toLowerCase();
+        const chatHistoryMetaPathLower = chatHistoryMetaPath.toLowerCase();
+
+        if (!(normalizedPathLower === normalizedSourcesRoot || normalizedPathLower.startsWith(sourcePrefixLower))) {
+            return false;
+        }
+
+        // Keep chat history under Sources, but do not auto-ingest the session metadata file.
+        if (normalizedPathLower === chatHistoryMetaPathLower) {
+            return false;
+        }
+
+        const normalizedExtension = (extension || this.extractExtensionFromPath(normalizedPath)).toLowerCase();
+        return normalizedExtension === 'md' || normalizedExtension === 'txt' || normalizedExtension === 'json';
+    }
+
+    private escapeRegExp(value: string): string {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    private async migrateSourceReferencesForRename(oldPath: string, newPath: string): Promise<void> {
+        const oldWithoutExt = normalizePath(oldPath).replace(/\.md$/i, '');
+        const newWithoutExt = normalizePath(newPath).replace(/\.md$/i, '');
+
+        if (!oldWithoutExt || oldWithoutExt === newWithoutExt) {
+            return;
+        }
+
+        const newAlias = newWithoutExt.split('/').pop() || newWithoutExt;
+        const wikiRoot = normalizePath(this.settings.wikiPath);
+        const wikiPrefix = `${wikiRoot}/`;
+        const oldTargetPattern = this.escapeRegExp(oldWithoutExt);
+
+        const linkedWithAliasPattern = new RegExp(`\\[\\[\\s*${oldTargetPattern}\\s*\\|\\s*[^\\]]+\\]\\]`, 'gi');
+        const linkedWithoutAliasPattern = new RegExp(`\\[\\[\\s*${oldTargetPattern}\\s*\\]\\]`, 'gi');
+        const replacement = `[[${newWithoutExt}|${newAlias}]]`;
+
+        const wikiFiles = this.app.vault
+            .getMarkdownFiles()
+            .filter((file) => {
+                const normalized = normalizePath(file.path);
+                return normalized === wikiRoot || normalized.startsWith(wikiPrefix);
+            });
+
+        let touched = 0;
+
+        for (const wikiFile of wikiFiles) {
+            const content = await this.app.vault.read(wikiFile);
+            const updated = content
+                .replace(linkedWithAliasPattern, replacement)
+                .replace(linkedWithoutAliasPattern, replacement);
+
+            if (updated !== content) {
+                await this.app.vault.modify(wikiFile, updated);
+                touched++;
+            }
+        }
+
+        if (touched > 0) {
+            await this.appendAutoIngestLog(
+                'info',
+                `rename-migrated oldPath=${normalizePath(oldPath)} newPath=${normalizePath(newPath)} wikiFilesUpdated=${touched}`
+            );
+        }
+    }
+
+    private async handleSourceRename(file: TFile, oldPath: string): Promise<void> {
+        const newPath = normalizePath(file.path);
+        const normalizedOldPath = normalizePath(oldPath);
+        const extension = file.extension.toLowerCase();
+
+        const oldInSources = this.shouldAutoIngestPath(normalizedOldPath, extension);
+        const newInSources = this.shouldAutoIngestPath(newPath, extension);
+
+        // Rename/move inside Sources: migrate links only, do not re-ingest.
+        if (oldInSources && newInSources) {
+            if (normalizedOldPath.toLowerCase() !== newPath.toLowerCase()) {
+                await this.migrateSourceReferencesForRename(normalizedOldPath, newPath);
+                await this.appendAutoIngestLog(
+                    'info',
+                    `event=rename-in-sources oldPath=${normalizedOldPath} file=${newPath} action=migrate-only`
+                );
+            }
+            return;
+        }
+
+        if (newInSources) {
+            void this.appendAutoIngestLog('info', `event=rename oldPath=${normalizedOldPath} file=${newPath}`);
+            this.enqueueAutoIngest(newPath);
+        }
+    }
+
+    private isPathInWikiRoot(path: string): boolean {
+        const wikiRoot = normalizePath(this.settings.wikiPath);
+        const normalizedPath = normalizePath(path);
+
+        const rootLower = wikiRoot.toLowerCase();
+        const pathLower = normalizedPath.toLowerCase();
+        return pathLower === rootLower || pathLower.startsWith(`${rootLower}/`);
+    }
+
+    private async syncWikiPageTitleOnRename(file: TFile, oldPath: string): Promise<void> {
+        if (file.extension.toLowerCase() !== 'md') {
+            return;
+        }
+
+        const newPath = normalizePath(file.path);
+        const normalizedOldPath = normalizePath(oldPath);
+
+        if (!this.isPathInWikiRoot(newPath) || !this.isPathInWikiRoot(normalizedOldPath)) {
+            return;
+        }
+
+        const newTitle = file.basename;
+        const original = await this.app.vault.read(file);
+
+        let updated = original;
+        let changed = false;
+
+        const frontmatterMatch = updated.match(/^---\n([\s\S]*?)\n---\n?/);
+        if (frontmatterMatch) {
+            const fullFrontmatter = frontmatterMatch[0];
+            const frontmatterBody = frontmatterMatch[1];
+            const nextFrontmatterBody = frontmatterBody.replace(/^title:\s*.*$/m, `title: ${newTitle}`);
+            if (nextFrontmatterBody !== frontmatterBody) {
+                const normalizedFrontmatter = `---\n${nextFrontmatterBody}\n---\n`;
+                updated = normalizedFrontmatter + updated.slice(fullFrontmatter.length);
+                changed = true;
+            }
+        }
+
+        const headingMatch = updated.match(/^(#\s+).+$/m);
+        if (headingMatch) {
+            const nextUpdated = updated.replace(/^(#\s+).+$/m, `$1${newTitle}`);
+            if (nextUpdated !== updated) {
+                updated = nextUpdated;
+                changed = true;
+            }
+        }
+
+        if (!changed) {
+            return;
+        }
+
+        await this.app.vault.modify(file, updated);
+        await this.appendAutoIngestLog(
+            'info',
+            `wiki-rename-title-sync oldPath=${normalizedOldPath} newPath=${newPath} newTitle=${newTitle}`
+        );
+    }
 
     async onload() {
         await this.loadSettings();
@@ -107,6 +274,15 @@ export default class LLMWikiPlugin extends Plugin {
 
         // Initialize source-file auto-ingest trigger
         this.setupAutoIngestTrigger();
+
+        // Keep wiki page title metadata and first heading in sync with file renames.
+        this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+            if (!(file instanceof TFile)) {
+                return;
+            }
+
+            void this.syncWikiPageTitleOnRename(file, oldPath);
+        }));
 
         // Build shared BM25 index (zero I/O �?uses metadataCache).
         // Kept in-sync via vault events so queryWiki can skip reading index.md.
@@ -305,7 +481,7 @@ export default class LLMWikiPlugin extends Plugin {
             `trigger=enabled sourcesPath=${normalizePath(this.settings.sourcesPath)}`
         );
 
-        const onCandidateFile = (eventName: 'create' | 'modify' | 'rename', file: unknown) => {
+        const onCandidateFile = (eventName: 'create', file: unknown) => {
             if (!(file instanceof TFile)) {
                 return;
             }
@@ -323,29 +499,18 @@ export default class LLMWikiPlugin extends Plugin {
         );
 
         this.autoIngestEventRefs.push(
-            this.app.vault.on('modify', (file) => onCandidateFile('modify', file))
-        );
+            this.app.vault.on('rename', (file, oldPath) => {
+                if (!(file instanceof TFile)) {
+                    return;
+                }
 
-        this.autoIngestEventRefs.push(
-            this.app.vault.on('rename', (file) => onCandidateFile('rename', file))
+                void this.handleSourceRename(file, oldPath);
+            })
         );
     }
 
     private shouldAutoIngest(file: TFile): boolean {
-        const sourcesRoot = normalizePath(this.settings.sourcesPath);
-        const normalizedPath = normalizePath(file.path);
-        const sourcePrefix = `${sourcesRoot}/`;
-
-        const normalizedSourcesRoot = sourcesRoot.toLowerCase();
-        const normalizedPathLower = normalizedPath.toLowerCase();
-        const sourcePrefixLower = sourcePrefix.toLowerCase();
-
-        if (!(normalizedPathLower === normalizedSourcesRoot || normalizedPathLower.startsWith(sourcePrefixLower))) {
-            return false;
-        }
-
-        const extension = file.extension.toLowerCase();
-        return extension === 'md' || extension === 'txt' || extension === 'json';
+        return this.shouldAutoIngestPath(file.path, file.extension);
     }
 
     private enqueueAutoIngest(filePath: string) {
@@ -1045,8 +1210,20 @@ class ModelEditModal extends Modal {
     private baseUrlInput!: HTMLInputElement;
     private apiKeyInput!: HTMLInputElement;
     private contextLengthValue: number = 4096;
-    private descriptionInput!: HTMLTextAreaElement;
     private supportsTools: boolean = true;
+    private maxToolIterationsInput!: HTMLInputElement;
+    private maxToolCallsPerTurnInput!: HTMLInputElement;
+    private maxToolWallTimeMsInput!: HTMLInputElement;
+    private maxContinuationPassesInput!: HTMLInputElement;
+    private maxToolResultCharsRatioInput!: HTMLInputElement;
+    private historyTurnsInput!: HTMLInputElement;
+    private retrievalTopNInput!: HTMLInputElement;
+    private retrievalRerankTopKInput!: HTMLInputElement;
+
+    private static readonly INPUT_STYLE = {
+        width: '100%',
+        boxSizing: 'border-box' as const,
+    };
     
     // Dynamic elements
     private baseUrlSetting!: Setting;
@@ -1151,15 +1328,6 @@ class ModelEditModal extends Modal {
         
         updateDisplay(this.contextLengthValue);
 
-        // Description
-        new Setting(contentEl)
-            .setName('Description')
-            .setDesc('Model description (optional)')
-            .addTextArea((text) => {
-                this.descriptionInput = text.inputEl;
-                text.setValue(this.model?.description || '');
-            });
-
         // Supports Tools
         new Setting(contentEl)
             .setName('Supports Tools')
@@ -1169,6 +1337,115 @@ class ModelEditModal extends Modal {
                 toggle.onChange((value) => {
                     this.supportsTools = value;
                 });
+            });
+
+        const advancedDetails = contentEl.createEl('details', { cls: 'advanced-model-settings' });
+        advancedDetails.createEl('summary', { text: 'Advanced settings' });
+        const advancedBody = advancedDetails.createDiv({ cls: 'advanced-model-settings-body' });
+
+        new Setting(advancedBody)
+            .setName('Performance Preset')
+            .setDesc('Apply recommended defaults for local or cloud models')
+            .addDropdown((dropdown) => {
+                dropdown.addOption('custom', 'Custom');
+                dropdown.addOption('local', 'Local');
+                dropdown.addOption('cloud', 'Cloud');
+                dropdown.setValue('custom');
+                dropdown.onChange((value) => {
+                    if (value === 'local' || value === 'cloud') {
+                        this.applyPerformancePreset(value);
+                    }
+                });
+            });
+
+        new Setting(advancedBody)
+            .setName('Max Tool Iterations')
+            .setDesc('Assistant-tool rounds before continuation')
+            .addText((text) => {
+                this.maxToolIterationsInput = text.inputEl;
+                this.maxToolIterationsInput.type = 'number';
+                this.maxToolIterationsInput.min = '1';
+                this.applyNumericInputStyle(this.maxToolIterationsInput);
+                text.setPlaceholder('8').setValue(String(this.model?.maxToolIterations ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Max Tool Calls Per Turn')
+            .setDesc('Total tool calls budget before continuation')
+            .addText((text) => {
+                this.maxToolCallsPerTurnInput = text.inputEl;
+                this.maxToolCallsPerTurnInput.type = 'number';
+                this.maxToolCallsPerTurnInput.min = '1';
+                this.applyNumericInputStyle(this.maxToolCallsPerTurnInput);
+                text.setPlaceholder('24').setValue(String(this.model?.maxToolCallsPerTurn ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Max Tool Wall Time (ms)')
+            .setDesc('Tool loop time budget before continuation')
+            .addText((text) => {
+                this.maxToolWallTimeMsInput = text.inputEl;
+                this.maxToolWallTimeMsInput.type = 'number';
+                this.maxToolWallTimeMsInput.min = '1000';
+                this.applyNumericInputStyle(this.maxToolWallTimeMsInput);
+                text.setPlaceholder('120000').setValue(String(this.model?.maxToolWallTimeMs ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Auto Continuation Passes')
+            .setDesc('Extra passes when budgets are reached')
+            .addText((text) => {
+                this.maxContinuationPassesInput = text.inputEl;
+                this.maxContinuationPassesInput.type = 'number';
+                this.maxContinuationPassesInput.min = '0';
+                this.applyNumericInputStyle(this.maxContinuationPassesInput);
+                text.setPlaceholder('1').setValue(String(this.model?.maxContinuationPasses ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Tool Result Char Ratio')
+            .setDesc('Per tool-result max chars ratio of context chars (0.1 - 0.8)')
+            .addText((text) => {
+                this.maxToolResultCharsRatioInput = text.inputEl;
+                this.maxToolResultCharsRatioInput.type = 'number';
+                this.maxToolResultCharsRatioInput.min = '0.1';
+                this.maxToolResultCharsRatioInput.max = '0.8';
+                this.maxToolResultCharsRatioInput.step = '0.05';
+                this.applyNumericInputStyle(this.maxToolResultCharsRatioInput);
+                text.setPlaceholder('0.25').setValue(String(this.model?.maxToolResultCharsRatio ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('History Turns')
+            .setDesc('Recent turns sent with each request')
+            .addText((text) => {
+                this.historyTurnsInput = text.inputEl;
+                this.historyTurnsInput.type = 'number';
+                this.historyTurnsInput.min = '1';
+                this.applyNumericInputStyle(this.historyTurnsInput);
+                text.setPlaceholder('6').setValue(String(this.model?.historyTurns ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Retrieval TopN')
+            .setDesc('BM25 candidates before rerank')
+            .addText((text) => {
+                this.retrievalTopNInput = text.inputEl;
+                this.retrievalTopNInput.type = 'number';
+                this.retrievalTopNInput.min = '1';
+                this.applyNumericInputStyle(this.retrievalTopNInput);
+                text.setPlaceholder('20').setValue(String(this.model?.retrievalTopN ?? ''));
+            });
+
+        new Setting(advancedBody)
+            .setName('Retrieval Rerank TopK')
+            .setDesc('Top chunks injected after rerank')
+            .addText((text) => {
+                this.retrievalRerankTopKInput = text.inputEl;
+                this.retrievalRerankTopKInput.type = 'number';
+                this.retrievalRerankTopKInput.min = '1';
+                this.applyNumericInputStyle(this.retrievalRerankTopKInput);
+                text.setPlaceholder('8').setValue(String(this.model?.retrievalRerankTopK ?? ''));
             });
 
         // Buttons
@@ -1209,6 +1486,129 @@ class ModelEditModal extends Modal {
         // Show/hide API key field based on provider
         const needsApiKey = metadata.authMode !== 'none';
         this.apiKeySetting.settingEl.style.display = needsApiKey ? 'flex' : 'none';
+    }
+
+    private applyPerformancePreset(preset: 'local' | 'cloud'): void {
+        if (preset === 'local') {
+            this.maxToolIterationsInput.value = '6';
+            this.maxToolCallsPerTurnInput.value = '14';
+            this.maxToolWallTimeMsInput.value = '9000';
+            this.maxContinuationPassesInput.value = '1';
+            this.maxToolResultCharsRatioInput.value = '0.2';
+            this.historyTurnsInput.value = '4';
+            this.retrievalTopNInput.value = '14';
+            this.retrievalRerankTopKInput.value = '5';
+            return;
+        }
+
+        this.maxToolIterationsInput.value = '8';
+        this.maxToolCallsPerTurnInput.value = '24';
+        this.maxToolWallTimeMsInput.value = '12000';
+        this.maxContinuationPassesInput.value = '1';
+        this.maxToolResultCharsRatioInput.value = '0.25';
+        this.historyTurnsInput.value = '6';
+        this.retrievalTopNInput.value = '20';
+        this.retrievalRerankTopKInput.value = '8';
+    }
+
+    private applyNumericInputStyle(input: HTMLInputElement): void {
+        input.style.width = ModelEditModal.INPUT_STYLE.width;
+        input.style.boxSizing = ModelEditModal.INPUT_STYLE.boxSizing;
+        input.style.border = '1px solid var(--background-modifier-border)';
+        input.style.borderRadius = '6px';
+        input.style.background = 'var(--background-primary)';
+        input.style.color = 'var(--text-normal)';
+        input.style.padding = '8px 12px';
+        input.style.fontSize = '14px';
+        input.style.outline = 'none';
+
+        input.addEventListener('focus', () => {
+            input.style.borderColor = 'var(--interactive-accent)';
+            input.style.boxShadow = '0 0 0 2px rgba(var(--interactive-accent-rgb), 0.2)';
+        });
+
+        input.addEventListener('blur', () => {
+            input.style.borderColor = 'var(--background-modifier-border)';
+            input.style.boxShadow = 'none';
+        });
+    }
+
+    private parseOptionalInt(input: HTMLInputElement): number | undefined {
+        const raw = input.value.trim();
+        if (!raw) {
+            return undefined;
+        }
+
+        const value = Number(raw);
+        if (!Number.isFinite(value)) {
+            return undefined;
+        }
+
+        return Math.floor(value);
+    }
+
+    private parseOptionalFloat(input: HTMLInputElement): number | undefined {
+        const raw = input.value.trim();
+        if (!raw) {
+            return undefined;
+        }
+
+        const value = Number(raw);
+        if (!Number.isFinite(value)) {
+            return undefined;
+        }
+
+        return value;
+    }
+
+    private parseBoundedOptionalInt(
+        input: HTMLInputElement,
+        label: string,
+        min: number,
+        max: number
+    ): number | undefined | null {
+        const raw = input.value.trim();
+        if (!raw) {
+            return undefined;
+        }
+
+        const value = Number(raw);
+        if (!Number.isFinite(value) || !Number.isInteger(value)) {
+            new Notice(`${label} must be an integer between ${min} and ${max}`);
+            return null;
+        }
+
+        if (value < min || value > max) {
+            new Notice(`${label} must be between ${min} and ${max}`);
+            return null;
+        }
+
+        return value;
+    }
+
+    private parseBoundedOptionalFloat(
+        input: HTMLInputElement,
+        label: string,
+        min: number,
+        max: number
+    ): number | undefined | null {
+        const raw = input.value.trim();
+        if (!raw) {
+            return undefined;
+        }
+
+        const value = Number(raw);
+        if (!Number.isFinite(value)) {
+            new Notice(`${label} must be a number between ${min} and ${max}`);
+            return null;
+        }
+
+        if (value < min || value > max) {
+            new Notice(`${label} must be between ${min} and ${max}`);
+            return null;
+        }
+
+        return value;
     }
 
     private async saveModel(): Promise<void> {
@@ -1268,6 +1668,55 @@ class ModelEditModal extends Modal {
             return null;
         }
 
+        const maxToolIterations = this.parseBoundedOptionalInt(this.maxToolIterationsInput, 'Max Tool Iterations', 1, 100);
+        if (maxToolIterations === null) {
+            return null;
+        }
+
+        const maxToolCallsPerTurn = this.parseBoundedOptionalInt(this.maxToolCallsPerTurnInput, 'Max Tool Calls Per Turn', 1, 200);
+        if (maxToolCallsPerTurn === null) {
+            return null;
+        }
+
+        const maxToolWallTimeMs = this.parseBoundedOptionalInt(this.maxToolWallTimeMsInput, 'Max Tool Wall Time (ms)', 1000, 120000);
+        if (maxToolWallTimeMs === null) {
+            return null;
+        }
+
+        const maxContinuationPasses = this.parseBoundedOptionalInt(this.maxContinuationPassesInput, 'Auto Continuation Passes', 0, 10);
+        if (maxContinuationPasses === null) {
+            return null;
+        }
+
+        const maxToolResultCharsRatio = this.parseBoundedOptionalFloat(this.maxToolResultCharsRatioInput, 'Tool Result Char Ratio', 0.1, 0.8);
+        if (maxToolResultCharsRatio === null) {
+            return null;
+        }
+
+        const historyTurns = this.parseBoundedOptionalInt(this.historyTurnsInput, 'History Turns', 1, 50);
+        if (historyTurns === null) {
+            return null;
+        }
+
+        const retrievalTopN = this.parseBoundedOptionalInt(this.retrievalTopNInput, 'Retrieval TopN', 1, 200);
+        if (retrievalTopN === null) {
+            return null;
+        }
+
+        const retrievalRerankTopK = this.parseBoundedOptionalInt(this.retrievalRerankTopKInput, 'Retrieval Rerank TopK', 1, 100);
+        if (retrievalRerankTopK === null) {
+            return null;
+        }
+
+        if (
+            retrievalTopN !== undefined
+            && retrievalRerankTopK !== undefined
+            && retrievalRerankTopK > retrievalTopN
+        ) {
+            new Notice('Retrieval Rerank TopK cannot be greater than Retrieval TopN');
+            return null;
+        }
+
         return {
             id: this.model?.id || `${provider}-${modelId}-${Date.now()}`,
             name,
@@ -1276,8 +1725,16 @@ class ModelEditModal extends Modal {
             baseUrl,
             apiKey: apiKey || undefined,
             contextLength: this.contextLengthValue,
-            description: this.descriptionInput.value.trim() || undefined,
+            description: this.model?.description,
             supportsTools: this.supportsTools,
+            maxToolIterations,
+            maxToolCallsPerTurn,
+            maxToolWallTimeMs,
+            maxContinuationPasses,
+            maxToolResultCharsRatio,
+            historyTurns,
+            retrievalTopN,
+            retrievalRerankTopK,
             isDefault: this.model?.isDefault || false,
         };
     }
