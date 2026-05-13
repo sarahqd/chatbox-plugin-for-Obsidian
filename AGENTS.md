@@ -19,21 +19,28 @@ Each Wiki page must follow this structure:
 title: Page Title
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
+summary: "Brief summary of the page (stored in frontmatter, max 200 characters)"
 tags: [tag1, tag2]
+related:
+  - "[[related-page1]]"
+  - "[[related-page2]]"
 ---
 
 # Page Title
 
-## Summary
-<!-- Brief summary, no more than 200 characters -->
+Main content goes here directly without a ## Content heading.
 
-## Content
-<!-- Main content -->
+Use Markdown formatting as needed:
+- Headings (H2, H3, H4)
+- **Bold** for emphasis
+- Lists, code blocks, etc.
 
 ## Related Links
 - [[related-page1]]
 - [[related-page2]]
 ```
+
+**Note**: The `summary` is stored in the frontmatter only, not displayed as a separate section in the body. This keeps the page clean and allows for efficient metadata queries.
 
 ## Bidirectional Link Specification
 
@@ -147,12 +154,19 @@ You have access to the following tools:
 When user says "Please help me create a page about Python":
 
 ```markdown
+---
+title: Python
+created: 2024-01-15
+updated: 2024-01-15
+summary: "Python is a high-level, general-purpose, interpreted programming language known for its concise syntax and powerful ecosystem."
+tags: [programming, python]
+related:
+  - "[[Programming-Language]]"
+  - "[[Machine-Learning]]"
+---
+
 # Python
 
-## Summary
-Python is a high-level, general-purpose, interpreted programming language known for its concise syntax and powerful ecosystem.
-
-## Content
 Python is a widely used programming language, especially in the following areas:
 
 - **Data Science**: NumPy, Pandas, Matplotlib

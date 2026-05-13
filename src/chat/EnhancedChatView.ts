@@ -1623,12 +1623,10 @@ When you need to use tools, please call the corresponding tool functions.`;
 
                                 if (toolName === 'search_files' && !hasReadPropertyInTurn) {
                                     const orderError = 'search_files requires staged retrieval. Call Read_Property or Batch_Read_Property first in this response.';
-                                    this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${orderError}`);
 
                                     if (!searchFilesOrderDegraded) {
                                         searchFilesOrderDegraded = true;
                                         activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
-                                        this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response. Continue with `Batch_Read_Property` -> `Batch_Read_Summary` -> `read_file` as needed.');
                                     }
 
                                     toolResults.push({
@@ -1647,12 +1645,10 @@ When you need to use tools, please call the corresponding tool functions.`;
                                     this.searchFilesCallCount += 1;
                                     if (this.searchFilesCallCount > SEARCH_FILES_CALL_BUDGET) {
                                         const budgetError = `search_files call budget exceeded (${SEARCH_FILES_CALL_BUDGET} per message). Narrow path scope or use Batch_Read_Property/Batch_Read_Summary first.`;
-                                        this.appendToLastMessage(`\n❌ **Tool execution skipped:** ${budgetError}`);
 
                                         if (!searchFilesBudgetExceeded) {
                                             searchFilesBudgetExceeded = true;
                                             activeTools = activeTools.filter((tool) => tool.function.name !== 'search_files');
-                                            this.appendToLastMessage('\n⚠️ **Search degraded:** `search_files` disabled for this response; continuing with read-only page tools.');
                                         }
 
                                         toolResults.push({
@@ -1706,7 +1702,7 @@ When you need to use tools, please call the corresponding tool functions.`;
                                 role: 'tool',
                                 content: JSON.stringify({
                                     success: false,
-                                    error: 'Tool execution skipped: tool call budget reached',
+                                    error: 'tool call budget reached',
                                 }),
                                 toolCallId: skippedToolCall.id,
                             });

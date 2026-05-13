@@ -330,10 +330,9 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
         workingBody = replaceSectionContent(workingBody, 'Related', '')?.trim() || workingBody;
     }
 
-    const contentSection = findSection(workingBody, 'Content');
-    if (contentSection) {
-        workingBody = contentSection.content.trim();
-    }
+    // Note: We no longer look for ## Content section
+    // Content is now directly in the body, not wrapped in a ## Content heading
+    // The workingBody is already the main content after removing metadata sections
 
     return {
         title: extractedTitle,
@@ -346,7 +345,7 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
 
 function formatWikiBodyFromMainContent(mainContent: string): string {
     const normalized = mainContent.trim();
-    return `## Content\n\n${normalized}\n`;
+    return `${normalized}\n`;
 }
 
 /**
@@ -989,7 +988,7 @@ export const batchReadSummaryTool: ToolDefinition = {
 
 export const updateSummaryTool: ToolDefinition = {
     name: 'Update_Summary',
-    description: 'Modify the Summary of a Wiki page: updates both frontmatter.summary and ## Summary section in body (if exists)',
+    description: 'Modify the Summary of a Wiki page: updates frontmatter.summary (the primary storage). Also updates ## Summary section in body if it exists.',
     parameters: {
         type: 'object',
         properties: {
@@ -1218,7 +1217,7 @@ export const updatePropertyTool: ToolDefinition = {
 
 export const updateContentTool: ToolDefinition = {
     name: 'Update_Content',
-    description: 'Modify only the Content section of a Wiki page',
+    description: 'Modify the main body content of a Wiki page (replaces the entire body after frontmatter)',
     parameters: {
         type: 'object',
         properties: {
@@ -1228,7 +1227,7 @@ export const updateContentTool: ToolDefinition = {
             },
             content: {
                 type: 'string',
-                description: 'The new Content section body',
+                description: 'The new body content (will replace the entire body after frontmatter)',
             },
         },
         required: ['path', 'content'],
@@ -1243,10 +1242,8 @@ export const updateContentTool: ToolDefinition = {
                 return { success: false, error: page.error };
             }
 
-            const newBody = replaceSectionContent(page.body, 'Content', params.content as string);
-            if (newBody === null) {
-                return { success: false, error: 'Content section not found' };
-            }
+            // Directly replace the entire body content (no ## Content section needed)
+            const newBody = formatWikiBodyFromMainContent(params.content as string);
 
             touchUpdated(page.frontmatter);
             await saveWikiPage(vault, page.file, page.frontmatter, newBody);
@@ -1269,7 +1266,7 @@ export const readPartTool: ToolDefinition = {
             },
             part: {
                 type: 'string',
-                description: 'Section heading title to read, such as Summary, Content, or Related Links',
+                description: 'Section heading title to read, such as Related Links',
             },
         },
         required: ['path', 'part'],
@@ -1316,7 +1313,7 @@ export const updatePartTool: ToolDefinition = {
             },
             part: {
                 type: 'string',
-                description: 'Section heading title to modify, such as Summary, Content, or Related Links',
+                description: 'Section heading title to modify, such as Related Links',
             },
             content: {
                 type: 'string',
