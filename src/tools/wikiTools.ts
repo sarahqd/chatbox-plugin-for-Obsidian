@@ -232,6 +232,36 @@ function replaceSectionContent(body: string, heading: string, newContent: string
     return body.slice(0, section.bodyStart) + replacement + body.slice(section.end);
 }
 
+const metadataBodySectionHeadings = ['Summary', 'Tags', 'Related Links', 'Related'] as const;
+
+function removeSection(body: string, heading: string): string {
+    const section = findSection(body, heading);
+    if (!section) {
+        return body;
+    }
+
+    const before = body.slice(0, section.headingStart).replace(/(?:\r?\n)+$/, '');
+    const after = body.slice(section.end).replace(/^(?:\r?\n)+/, '');
+
+    if (before && after) {
+        return `${before}\n\n${after}`;
+    }
+
+    return before || after;
+}
+
+function stripMetadataSectionsFromBody(body: string): string {
+    let cleaned = body;
+
+    for (const heading of metadataBodySectionHeadings) {
+        while (findSection(cleaned, heading)) {
+            cleaned = removeSection(cleaned, heading);
+        }
+    }
+
+    return cleaned.trim();
+}
+
 interface ExtractedIngestMetadata {
     title?: string;
     summary?: string;
@@ -303,7 +333,7 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
     const summarySection = findSection(workingBody, 'Summary');
     if (summarySection) {
         extractedSummary = extractedSummary || summarySection.content.replace(/\s+/g, ' ').trim();
-        workingBody = replaceSectionContent(workingBody, 'Summary', '')?.trim() || workingBody;
+        workingBody = removeSection(workingBody, 'Summary').trim();
     }
 
     const tagsSection = findSection(workingBody, 'Tags');
@@ -311,7 +341,7 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
         if (extractedTags.length === 0) {
             extractedTags = parseSectionListItems(tagsSection.content);
         }
-        workingBody = replaceSectionContent(workingBody, 'Tags', '')?.trim() || workingBody;
+        workingBody = removeSection(workingBody, 'Tags').trim();
     }
 
     const relatedLinksSection = findSection(workingBody, 'Related Links');
@@ -319,7 +349,7 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
         if (extractedRelated.length === 0) {
             extractedRelated = parseRelatedCandidates(relatedLinksSection.content);
         }
-        workingBody = replaceSectionContent(workingBody, 'Related Links', '')?.trim() || workingBody;
+        workingBody = removeSection(workingBody, 'Related Links').trim();
     }
 
     const relatedSection = findSection(workingBody, 'Related');
@@ -327,7 +357,7 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
         if (extractedRelated.length === 0) {
             extractedRelated = parseRelatedCandidates(relatedSection.content);
         }
-        workingBody = replaceSectionContent(workingBody, 'Related', '')?.trim() || workingBody;
+        workingBody = removeSection(workingBody, 'Related').trim();
     }
 
     // Note: We no longer look for ## Content section
@@ -344,8 +374,8 @@ function extractIngestMetadataFromContent(rawContent: string): ExtractedIngestMe
 }
 
 function formatWikiBodyFromMainContent(mainContent: string): string {
-    const normalized = mainContent.trim();
-    return `${normalized}\n`;
+    const normalized = stripMetadataSectionsFromBody(mainContent);
+    return normalized ? `${normalized}\n` : '';
 }
 
 /**
@@ -854,10 +884,15 @@ export const updateWikiPageTool: ToolDefinition = {
             if (params.content) {
                 const replacement = extractedFromContent?.content || (params.content as string).trim();
                 if (params.append) {
-                    newBody = body + '\n\n' + replacement;
+                    const existingBody = stripMetadataSectionsFromBody(body);
+                    const appendedBody = stripMetadataSectionsFromBody(replacement);
+                    const combinedBody = [existingBody, appendedBody].filter(Boolean).join('\n\n');
+                    newBody = formatWikiBodyFromMainContent(combinedBody);
                 } else {
                     newBody = formatWikiBodyFromMainContent(replacement);
                 }
+            } else {
+                newBody = formatWikiBodyFromMainContent(newBody);
             }
 
             // Keep source metadata in frontmatter related instead of inserting body sections.
@@ -988,7 +1023,7 @@ export const batchReadSummaryTool: ToolDefinition = {
 
 export const updateSummaryTool: ToolDefinition = {
     name: 'Update_Summary',
-    description: 'Modify the Summary of a Wiki page: updates frontmatter.summary (the primary storage). Also updates ## Summary section in body if it exists.',
+    description: 'Modify the Summary of a Wiki page: updates only frontmatter.summary (the primary storage). Body metadata sections are removed instead of synchronized.',
     parameters: {
         type: 'object',
         properties: {
@@ -1018,13 +1053,7 @@ export const updateSummaryTool: ToolDefinition = {
             const summaryMaxLength = context.settings.summaryMaxLength ?? 200;
             page.frontmatter.summary = newSummary.slice(0, summaryMaxLength);
 
-            // Try to update ## Summary section in body (if exists)
-            const updatedBody = replaceSectionContent(page.body, 'Summary', newSummary);
-            const hasSummarySection = updatedBody !== null;
-            
-            // If no ## Summary section in body, just keep the original body
-            // The summary is stored in frontmatter only
-            const newBody = hasSummarySection ? updatedBody : page.body;
+            const newBody = formatWikiBodyFromMainContent(page.body);
 
             touchUpdated(page.frontmatter);
             await saveWikiPage(vault, page.file, page.frontmatter, newBody);
@@ -1033,7 +1062,7 @@ export const updateSummaryTool: ToolDefinition = {
                 data: { 
                     path,
                     frontmatterUpdated: true,
-                    bodySectionUpdated: hasSummarySection,
+                    bodySectionUpdated: false,
                 } 
             };
         } catch (error) {
@@ -1217,7 +1246,7 @@ export const updatePropertyTool: ToolDefinition = {
 
 export const updateContentTool: ToolDefinition = {
     name: 'Update_Content',
-    description: 'Modify the main body content of a Wiki page (replaces the entire body after frontmatter)',
+    description: 'Modify the main body content of a Wiki page (replaces the entire body after frontmatter). Metadata-like body sections are stripped before saving.',
     parameters: {
         type: 'object',
         properties: {
@@ -1227,7 +1256,7 @@ export const updateContentTool: ToolDefinition = {
             },
             content: {
                 type: 'string',
-                description: 'The new body content (will replace the entire body after frontmatter)',
+                description: 'The new body content (will replace the entire body after frontmatter). Do not include Summary, Tags, Related Links, or Related sections.',
             },
         },
         required: ['path', 'content'],

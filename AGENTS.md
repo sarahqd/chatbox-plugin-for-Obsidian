@@ -85,11 +85,13 @@ When user submits a new document:
 1. **Analyze Content**: Identify main entities, concepts, and relationships
 2. **Find Associations**: Check if there are related pages in existing Wiki
 3. **Create/Update Pages**:
-   - If it's a new concept, create a new page
+   - If the source document substantively describes a new concept, create a new page
    - If there's an existing related page, update the content
 4. **Establish Links**: Create bidirectional links
 5. **Update Index**: Ensure the index file includes the new page
 6. **Log Operation**: Record the operation in log.md
+
+**Content Boundary Rule**: Do not create or expand entries only because a keyword, name, or term appears in the document. New pages and added body content must be grounded in content that the current document actually explains, describes, or contextualizes. Shallow keywords may be preserved as text, tags, or related-link candidates, but must not be interpreted with external knowledge or expanded into standalone entries.
 
 ### Query Flow
 

@@ -288,7 +288,11 @@ export default class LLMWikiPlugin extends Plugin {
         // Kept in-sync via vault events so queryWiki can skip reading index.md.
         this.searchEngine = new WikiSearchEngine(this.app, this.settings);
         this.app.workspace.onLayoutReady(() => {
-            void this.ensureSearchIndexReady('startup');
+            if (this.settings.buildSearchIndexOnStartup) {
+                void this.ensureSearchIndexReady('startup', {
+                    rebuildGeneratedIndex: this.settings.rebuildGeneratedIndexOnStartup,
+                });
+            }
             this.registerEvent(this.app.vault.on('create', f => {
                 if (f instanceof TFile && f.extension === 'md') {
                     this.searchEngine.onFileCreated(f);
@@ -374,7 +378,10 @@ export default class LLMWikiPlugin extends Plugin {
         this.pendingModifyTimers.set(file.path, timer);
     }
 
-    private async ensureSearchIndexReady(reason: 'startup' | 'manual'): Promise<{ pageCount: number; slices: number }> {
+    async ensureSearchIndexReady(
+        reason: 'startup' | 'manual' | 'query',
+        options: { rebuildGeneratedIndex?: boolean } = {}
+    ): Promise<{ pageCount: number; slices: number }> {
         if (this.searchIndexTask) {
             if (reason === 'manual') {
                 new Notice('Wiki index rebuild is already running');
@@ -385,8 +392,11 @@ export default class LLMWikiPlugin extends Plugin {
         this.searchIndexStatus = 'building';
         this.searchIndexError = null;
 
+        const rebuildGeneratedIndex = options.rebuildGeneratedIndex ?? reason === 'manual';
         const notice = new Notice(
-            reason === 'startup' ? 'Building Wiki search index...' : 'Rebuilding Wiki index...',
+            reason === 'manual'
+                ? 'Rebuilding Wiki index...'
+                : 'Building Wiki search index...',
             0
         );
 
@@ -400,17 +410,22 @@ export default class LLMWikiPlugin extends Plugin {
                     }
                 });
 
-                this.updateNotice(notice, 'Rebuilding generated Wiki index...');
-                const generatedIndex = await rebuildGeneratedWikiIndex(this.app, this.settings, {
-                    pageYieldBatchSize: 100,
-                    onProgress: (message) => this.updateNotice(notice, message),
-                });
+                let generatedIndex = { pageCount, slices: 0 };
+                if (rebuildGeneratedIndex) {
+                    this.updateNotice(notice, 'Rebuilding generated Wiki index...');
+                    generatedIndex = await rebuildGeneratedWikiIndex(this.app, this.settings, {
+                        pageYieldBatchSize: 100,
+                        onProgress: (message) => this.updateNotice(notice, message),
+                    });
+                }
 
                 this.searchIndexStatus = 'ready';
                 this.searchIndexError = null;
                 this.updateNotice(
                     notice,
-                    `Wiki index ready: ${pageCount} pages, ${generatedIndex.slices} slices`
+                    rebuildGeneratedIndex
+                        ? `Wiki index ready: ${pageCount} pages, ${generatedIndex.slices} slices`
+                        : `Wiki search index ready: ${pageCount} pages`
                 );
                 return generatedIndex;
             } catch (error) {
@@ -1024,6 +1039,30 @@ class LLMWikiSettingTab extends PluginSettingTab {
                         this.plugin.settings.autoLint = value;
                         await this.plugin.saveSettings();
                         this.plugin.setupAutoLintSchedule();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName('Build search index on startup')
+            .setDesc('Prebuild the BM25 metadata index when Obsidian starts. Disable for very large vaults; the first query will build it on demand.')
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.buildSearchIndexOnStartup)
+                    .onChange(async (value) => {
+                        this.plugin.settings.buildSearchIndexOnStartup = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName('Rebuild generated WikiIndex on startup')
+            .setDesc('Rewrite human-readable WikiIndex slice files during startup indexing. Keep disabled for large vaults unless you need fresh index files immediately.')
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.rebuildGeneratedIndexOnStartup)
+                    .onChange(async (value) => {
+                        this.plugin.settings.rebuildGeneratedIndexOnStartup = value;
+                        await this.plugin.saveSettings();
                     })
             );
 

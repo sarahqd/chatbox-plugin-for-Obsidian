@@ -216,6 +216,8 @@ export interface LLMWikiSettings {
     indexPath: string;
     autoIngest: boolean;
     autoLint: boolean;
+    buildSearchIndexOnStartup: boolean; // Build BM25 metadata index when Obsidian layout is ready
+    rebuildGeneratedIndexOnStartup: boolean; // Also rewrite human-readable WikiIndex slices on startup
     lintInterval: number;
     lastLintTime: number;         // Last completed lint timestamp (ms)
     lastStaleCheckTime: number;   // Last stale check timestamp (ms) - runs monthly
@@ -257,6 +259,8 @@ export const DEFAULT_SETTINGS: LLMWikiSettings = {
     indexPath: 'WikiIndex',
     autoIngest: true,
     autoLint: false,
+    buildSearchIndexOnStartup: false,
+    rebuildGeneratedIndexOnStartup: false,
     lintInterval: 60,
     lastLintTime: 0,
     lastStaleCheckTime: 0,

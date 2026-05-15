@@ -158,7 +158,7 @@ export const deleteFileTool: ToolDefinition = {
  */
 export const listFilesTool: ToolDefinition = {
     name: 'list_files',
-    description: 'List all files in a directory',
+    description: 'List files in a directory with pagination. Use path/query/extensions/limit to avoid broad vault listings.',
     parameters: {
         type: 'object',
         properties: {
@@ -170,6 +170,30 @@ export const listFilesTool: ToolDefinition = {
                 type: 'boolean',
                 description: 'Whether to list files recursively',
             },
+            limit: {
+                type: 'number',
+                description: 'Maximum entries to return (default: 100, max: 500)',
+            },
+            cursor: {
+                type: 'string',
+                description: 'Pagination cursor from a previous list_files response',
+            },
+            extensions: {
+                type: 'array',
+                description: 'Optional file extensions to include, such as ["md", "txt"]',
+            },
+            query: {
+                type: 'string',
+                description: 'Optional case-insensitive substring filter applied to paths',
+            },
+            includeFolders: {
+                type: 'boolean',
+                description: 'Whether to include folder paths in results',
+            },
+            maxDepth: {
+                type: 'number',
+                description: 'Maximum recursive folder depth from the base path (default: unlimited)',
+            },
         },
         required: [],
     },
@@ -177,9 +201,25 @@ export const listFilesTool: ToolDefinition = {
         const vault = context.vault as any;
         const basePath = params.path ? normalizePath(params.path as string) : '';
         const recursive = (params.recursive as boolean) ?? false;
+        const rawLimit = Number(params.limit ?? 100);
+        const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(Math.floor(rawLimit), 500)) : 100;
+        const rawCursor = Number(params.cursor ?? 0);
+        const cursor = Number.isFinite(rawCursor) ? Math.max(0, Math.floor(rawCursor)) : 0;
+        const includeFolders = (params.includeFolders as boolean) ?? false;
+        const query = String(params.query ?? '').trim().toLowerCase();
+        const rawMaxDepth = params.maxDepth === undefined ? Infinity : Number(params.maxDepth);
+        const maxDepth = Number.isFinite(rawMaxDepth) ? Math.max(0, Math.floor(rawMaxDepth)) : Infinity;
+        const extensionFilter = new Set(
+            Array.isArray(params.extensions)
+                ? params.extensions
+                    .map((extension) => String(extension).replace(/^\./, '').toLowerCase().trim())
+                    .filter(Boolean)
+                : []
+        );
 
         try {
             const files: string[] = [];
+            const folders: string[] = [];
             const folder = basePath
                 ? vault.getAbstractFileByPath(basePath)
                 : vault.root;
@@ -188,18 +228,71 @@ export const listFilesTool: ToolDefinition = {
                 return { success: false, error: `Folder not found: ${basePath}` };
             }
 
-            const collectFiles = (currentFolder: TFolder) => {
-                for (const child of currentFolder.children) {
-                    if (child instanceof TFile) {
-                        files.push(child.path);
-                    } else if (recursive && child instanceof TFolder) {
-                        collectFiles(child);
-                    }
+            let matched = 0;
+            let totalScanned = 0;
+            let nextCursor: string | null = null;
+
+            const shouldIncludePath = (path: string, extension?: string): boolean => {
+                if (query && !path.toLowerCase().includes(query)) {
+                    return false;
                 }
+
+                if (extension !== undefined && extensionFilter.size > 0 && !extensionFilter.has(extension.toLowerCase())) {
+                    return false;
+                }
+
+                return true;
             };
 
-            collectFiles(folder);
-            return { success: true, data: { files } };
+            const collectEntry = (path: string, target: string[]): boolean => {
+                totalScanned++;
+                if (matched < cursor) {
+                    matched++;
+                    return true;
+                }
+
+                if (target.length >= limit) {
+                    nextCursor = String(matched);
+                    return false;
+                }
+
+                target.push(path);
+                matched++;
+                return true;
+            };
+
+            const collectFiles = (currentFolder: TFolder, depth: number): boolean => {
+                for (const child of currentFolder.children) {
+                    if (child instanceof TFile) {
+                        if (shouldIncludePath(child.path, child.extension) && !collectEntry(child.path, files)) {
+                            return false;
+                        }
+                    } else if (child instanceof TFolder) {
+                        if (includeFolders && shouldIncludePath(child.path) && !collectEntry(child.path, folders)) {
+                            return false;
+                        }
+
+                        if (recursive && depth < maxDepth && !collectFiles(child, depth + 1)) {
+                            return false;
+                        }
+                    }
+                }
+
+                return true;
+            };
+
+            collectFiles(folder, 0);
+            return {
+                success: true,
+                data: {
+                    files,
+                    folders,
+                    nextCursor,
+                    limit,
+                    totalScanned,
+                    truncated: nextCursor !== null,
+                },
+            };
         } catch (error) {
             return { success: false, error: String(error) };
         }

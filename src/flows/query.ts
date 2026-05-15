@@ -180,6 +180,8 @@ export interface RetrievalDiagnostics {
     searchEngineReady: boolean;
     /** BM25 search results count */
     bm25ResultCount: number;
+    /** Top BM25/fallback candidates for diagnostics */
+    bm25TopResults?: Array<{ path: string; title: string; bm25: number }>;
     /** Whether embedding model is configured */
     embeddingConfigured: boolean;
     /** Embedding model ID (if configured) */
@@ -192,6 +194,8 @@ export interface RetrievalDiagnostics {
     rerankCandidateCount?: number;
     /** Final chunk count after rerank */
     rerankResultCount?: number;
+    /** Top reranked chunks for diagnostics */
+    rerankTopResults?: Array<{ path: string; title: string; score: number }>;
     /** Any errors encountered */
     errors: string[];
     /** Total retrieval time in ms */
@@ -264,7 +268,7 @@ export async function getRelevantIndexContext(
         const queryTerms = tokenize(question);
         diagnostics.queryTerms = queryTerms;
         
-        const topResults = searchEngine.search(question, retrievalTopN);
+        const topResults = searchEngine.searchWithFallback(question, retrievalTopN);
         diagnostics.bm25ResultCount = topResults.length;
         diagnostics.bm25TopResults = topResults.slice(0, 5).map(r => ({
             path: r.path,

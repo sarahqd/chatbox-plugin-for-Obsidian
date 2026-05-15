@@ -351,7 +351,67 @@ export class WikiSearchEngine {
 
         // Stage 2: Fuzzy matching
         const fuzzyResults = this.searchFuzzy(query, topN);
-        return fuzzyResults;
+        if (fuzzyResults.length > 0) {
+            return fuzzyResults;
+        }
+
+        // Stage 3: Cached metadata substring/overlap scan.
+        // This is still zero-I/O and catches path/title/tag fragments BM25 did not tokenize.
+        return this.searchMetadataFallback(query, topN);
+    }
+
+    private searchMetadataFallback(query: string, topN = 30): SearchResult[] {
+        if (!this.ready || this.docs.size === 0) {
+            return [];
+        }
+
+        const normalizedQuery = query.trim().toLowerCase();
+        const queryTerms = tokenize(query);
+        if (!normalizedQuery && queryTerms.length === 0) {
+            return [];
+        }
+
+        const scored: SearchResult[] = [];
+        for (const doc of this.docs.values()) {
+            const haystack = [
+                doc.path,
+                doc.title,
+                doc.tags.join(' '),
+                doc.summary,
+                doc.headings.join(' '),
+            ].join(' ').toLowerCase();
+
+            let score = 0;
+            if (normalizedQuery && haystack.includes(normalizedQuery)) {
+                score += 3;
+            }
+
+            for (const term of queryTerms) {
+                if (haystack.includes(term)) {
+                    score += 1;
+                }
+            }
+
+            if (score > 0) {
+                scored.push({
+                    path: doc.path,
+                    title: doc.title,
+                    summary: doc.summary,
+                    bm25: score,
+                    ctime: doc.ctime,
+                });
+            }
+        }
+
+        scored.sort((left, right) => {
+            if (right.bm25 !== left.bm25) {
+                return right.bm25 - left.bm25;
+            }
+
+            return right.ctime - left.ctime;
+        });
+
+        return scored.slice(0, topN);
     }
 
     async rerank(

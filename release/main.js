@@ -133,7 +133,7 @@ You can use the following tools to manipulate files and Wiki:
 
 Tool selection rules:
 - Prefer Read_Part when you only need one named section from an existing page.
-- Prefer Update_Content when only the ## Content section should change and Summary or frontmatter must stay intact.
+- Prefer Update_Content when only the main body should change and Summary or frontmatter must stay intact.
 - Prefer Update_Part when changing one specific heading block other than broad full-page replacement.
 - Use update_wiki_page only for full-body replacement, append operations, or source-link maintenance that affects the page more broadly.
 
@@ -157,7 +157,7 @@ Please analyze the document, extract key entities and concepts, and create or up
 ${t?`## Title
 ${t}
 
-`:""}## Content
+`:""}
 \`\`\`
 ${e}
 \`\`\`
@@ -269,7 +269,7 @@ Tool selection rules:
 - Use search_files only after at least one successful Read_Property or Batch_Read_Property call in the current response, and only when candidate paths are still insufficient.
 - Consider relevance high only when title/tags/related or summary clearly match the user intent.
 - If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
-- If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
+- If the user asks to rewrite only the main body, prefer Update_Content instead of update_wiki_page.
 - If the user asks to update one specific section by heading title, prefer Update_Part.
 - Use update_wiki_page only when the whole page body needs broad replacement or append behavior.
 

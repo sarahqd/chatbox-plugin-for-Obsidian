@@ -50,6 +50,10 @@ interface ChatViewPluginApi {
     searchEngine: WikiSearchEngine;
     getSearchIndexStatus: () => SearchIndexStatus;
     getSearchIndexStatusMessage: () => string;
+    ensureSearchIndexReady?: (
+        reason: 'startup' | 'manual' | 'query',
+        options?: { rebuildGeneratedIndex?: boolean }
+    ) => Promise<{ pageCount: number; slices: number }>;
 }
 
 // Tool call data structure for rendering
@@ -1035,7 +1039,7 @@ Tool selection rules:
 - Use search_files only after at least one successful Read_Property or Batch_Read_Property call in the current response, and only when candidate paths are still insufficient.
 - Consider relevance high only when title/tags/related or summary clearly match the user intent.
 - If the user asks for a single named section, prefer Read_Part instead of reading the whole file.
-- If the user asks to rewrite only the main body under ## Content, prefer Update_Content instead of update_wiki_page.
+- If the user asks to rewrite only the main body, prefer Update_Content instead of update_wiki_page.
 - If the user asks to update one specific section by heading title, prefer Update_Part.
 - Use update_wiki_page only when the whole page body needs broad replacement or append behavior.
 
@@ -2175,6 +2179,13 @@ When you need to use tools, please call the corresponding tool functions.`;
         retrievalTopN: number = DEFAULT_RETRIEVAL_TOP_N,
         retrievalRerankTopK: number = DEFAULT_RETRIEVAL_RERANK_TOP_K
     ): Promise<string | null> {
+        if (
+            this.plugin.getSearchIndexStatus() === 'idle'
+            && typeof this.plugin.ensureSearchIndexReady === 'function'
+        ) {
+            await this.plugin.ensureSearchIndexReady('query', { rebuildGeneratedIndex: false });
+        }
+
         return getRelevantIndexContext(
             this.app,
             this.plugin.settings,

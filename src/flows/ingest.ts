@@ -8,7 +8,7 @@ import type { LLMWikiSettings, OllamaMessage, ToolContext, IngestResult } from '
 import { getLLMClient } from '../llm/client';
 import { executeTool, getOllamaTools } from '../tools';
 
-const SYSTEM_PROMPT = `You are a knowledge base management assistant. Your task is to integrate new document content into the existing Wiki knowledge base.
+export const SYSTEM_PROMPT = `You are a knowledge base management assistant. Your task is to integrate new document content into the existing Wiki knowledge base.
 
 ## CRITICAL CONSTRAINT: Content Fidelity
 **STRICTLY PROHIBITED**: You must NOT introduce any content, information, or knowledge that does not exist in the original source document.
@@ -26,10 +26,23 @@ const SYSTEM_PROMPT = `You are a knowledge base management assistant. Your task 
 
 When in doubt, omit content rather than add external information.
 
+## CRITICAL CONSTRAINT: Source-Supported Topic Creation
+You must distinguish between substantively described topics and shallow keywords.
+
+Only create or update a Wiki page for a topic when the current source document explicitly gives that topic meaningful content, such as a definition, description, procedure, factual details, relationships, examples, or enough context to support a standalone note.
+
+Do NOT create a Wiki page merely because a keyword, name, or term appears in the document. A term is a shallow keyword when it is only mentioned once, appears only in a list, tag, heading, quote, citation, or passing reference, or lacks explanation in the source document.
+
+For shallow keywords:
+- You may preserve them as text in a source-supported summary or body
+- You may use them as tags or related-link candidates when appropriate
+- You must NOT expand them into standalone entries
+- You must NOT add your own explanation, background, examples, or encyclopedia-style details
+
 ## Workflow
-1. Analyze new documents, extract key information, entities and concepts FROM THE SOURCE ONLY
+1. Analyze new documents, extract only source-supported topics, relationships, and facts FROM THE SOURCE ONLY
 2. Check Wiki index, find related existing pages
-3. Decide whether to create new pages or update existing ones
+3. Create or update pages only for topics substantively described by the current source
 4. Use the provided tools to perform file operations
 5. Ensure appropriate [[bidirectional links]] are added
 
@@ -41,6 +54,7 @@ When in doubt, omit content rather than add external information.
 - Keep content concise and structured
 - Provide a brief summary for each page
 - ALL content must originate from the source document
+- Every created or updated page must be supported by content present in the current source document
 
 ## Available Tools
 You can use the following tools to manipulate files and Wiki:
@@ -63,7 +77,7 @@ You can use the following tools to manipulate files and Wiki:
 
 Tool selection rules:
 - Prefer Read_Part when you only need one named section from an existing page.
-- Prefer Update_Content when only the ## Content section should change and Summary or frontmatter must stay intact.
+- Prefer Update_Content when only the main body should change and Summary or frontmatter must stay intact.
 - Prefer Update_Part when changing one specific heading block other than broad full-page replacement.
 - Use update_wiki_page only for full-body replacement, append operations, or source-link maintenance that affects the page more broadly.
 
@@ -177,7 +191,7 @@ ${content}
 ${indexContent || '(Wiki is empty)'}
 \`\`\`
 
-Please analyze the document, extract key entities and concepts, and create or update corresponding Wiki pages.`,
+Please analyze the document, extract only source-supported topics and relationships, and create or update Wiki pages only when each page's content is grounded in the current document.`,
         },
     ];
 
@@ -320,7 +334,7 @@ export async function ingestContent(
                 role: 'user',
                 content: `Please integrate the following content into the Wiki.
 
-${title ? `## Title\n${title}\n\n` : ''}## Content
+${title ? `## Title\n${title}\n\n` : ''}
 \`\`\`
 ${content}
 \`\`\`
@@ -330,7 +344,7 @@ ${content}
 ${indexContent || '(Wiki is empty)'}
 \`\`\`
 
-Please analyze the content, extract key entities and concepts, and create or update corresponding Wiki pages.`,
+Please analyze the content, extract only source-supported topics and relationships, and create or update Wiki pages only when each page's content is grounded in the current content.`,
             },
         ];
 
